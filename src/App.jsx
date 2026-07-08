@@ -1,22 +1,30 @@
 import React, { useState, useRef, useEffect, useCallback } from "react";
 import { listJobs, getJob, putJob, deleteJob as dbDeleteJob, getImageBlob, putImageBlob, dataURLToBlob, blobToDataURL } from "./db.js";
 
-// ---------- BML markup convention (locked — mirrors bml-floorplan-quantify-quote v2) ----------
+// ---------- BML markup convention (v3.1 — mirrors bml-floorplan-quantify-quote) ----------
+// "Full strip" removed (v3.1): Jordan overlays floor_strip + ceiling_strip separately instead.
 const CATS = [
-  { id: "full_strip",    label: "Full strip",               kind: "fill", color: "#EE0000" },
-  { id: "floor_strip",   label: "Floor + subfloor",         kind: "fill", color: "#FF00FF" },
-  { id: "ceiling_strip", label: "Ceiling strip",            kind: "fill", color: "#FFFF00" },
-  { id: "condition2",    label: "Condition 2 clean",        kind: "fill", color: "#00B0F0" },
-  { id: "cabinetry",     label: "Cabinetry",                kind: "fill", color: "#6600FF" },
-  { id: "contingent",    label: "Contingent (provisional)", kind: "fill", color: "#FF9900" },
-  { id: "wall_strip",    label: "Wall strip (full ht)",     kind: "line", color: "#EE0000" },
-  { id: "containment",   label: "Containment set-up",       kind: "line", color: "#4EA72E" },
+  { id: "floor_strip",   label: "Strip floor coverings + remediate subfloor surface",              kind: "fill", color: "#FF00FF" },
+  { id: "ceiling_strip", label: "Strip ceiling linings + remediate cavity surfaces then contain",   kind: "fill", color: "#FFFF00" },
+  { id: "condition2",    label: "Condition 2 clean all surfaces",                                   kind: "fill", color: "#00B0F0" },
+  { id: "cabinetry",     label: "Cabinetry strip",                                                   kind: "fill", color: "#6600FF" },
+  { id: "contingent",    label: "Contingent (provisional)",                                          kind: "fill", color: "#FF9900" },
+  { id: "wall_strip",    label: "Wall strip",                                                        kind: "line", color: "#EE0000" },
+  { id: "containment",   label: "Containment set-up",                                                kind: "line", color: "#4EA72E" },
 ];
 const catById = (id) => CATS.find((c) => c.id === id);
 const FILL_OPACITY = 0.35;
 const MIN_PX = 4;
 
-const APP_VERSION = "v3.0";
+// Wall-strip removal-height options. 'full' means "use the room's ceiling height".
+const HEIGHTS = [
+  { value: "full", label: "Full height" },
+  { value: 1.2,    label: "1200 mm" },
+  { value: 0.6,    label: "600 mm" },
+  { value: 0.3,    label: "300 mm" },
+];
+
+const APP_VERSION = "v3.1";
 const BUILD_DATE = typeof __BUILD_DATE__ !== "undefined" ? __BUILD_DATE__ : "";
 
 export default function App() {
@@ -37,7 +45,8 @@ export default function App() {
   const [activeRoom, setActiveRoom] = useState(null);
   // tools
   const [tool, setTool] = useState("select");
-  const [activeCat, setActiveCat] = useState("full_strip");
+  const [activeCat, setActiveCat] = useState("floor_strip");
+  const [wallHgt, setWallHgt] = useState("full"); // default removal height for NEW wall_strip lines
   // shapes
   const [shapes, setShapes] = useState([]);
   const [selId, setSelId] = useState(null);
@@ -242,7 +251,8 @@ export default function App() {
       pushUndo();
       const s = cat.kind === "fill"
         ? { id: nid(), type: "rect", cat: cat.id, room: activeRoom, x: pt.x, y: pt.y, w: 0, h: 0 }
-        : { id: nid(), type: "line", cat: cat.id, room: activeRoom, x1: pt.x, y1: pt.y, x2: pt.x, y2: pt.y };
+        : { id: nid(), type: "line", cat: cat.id, room: activeRoom, x1: pt.x, y1: pt.y, x2: pt.x, y2: pt.y,
+            ...(cat.id === "wall_strip" ? { hgt: wallHgt } : {}) };
       setShapes((a) => [...a, s]);
       drag.current = { mode: "new", id: s.id, sx: pt.x, sy: pt.y };
       return;
@@ -362,16 +372,39 @@ export default function App() {
 
   // ---------- quantities ----------
   const fmt = (v, d = 2) => v.toLocaleString("en-AU", { minimumFractionDigits: d, maximumFractionDigits: d });
+  const roomCH = (roomId) => rooms.find((r) => r.id === roomId)?.ch ?? 2.4;
+  const wallEffHeight = (s) => (s.hgt === "full" || s.hgt == null ? roomCH(s.room) : s.hgt);
+  const lenOf = (s) => Math.hypot(s.x2 - s.x1, s.y2 - s.y1) * scale; // raw line length in m (wall_strip linm tracking)
+  // Primary priced quantity per shape. Rects: footprint m² (condition2 = full zone surface,
+  // no netting of stripped areas — v3.1). Lines: wall_strip m² via its own removal height;
+  // containment is counted, not measured (handled in roomRows).
   const qtyOf = (s) => {
     if (!scale) return null;
-    if (s.type === "rect") return s.w * s.h * scale * scale;
-    return Math.hypot(s.x2 - s.x1, s.y2 - s.y1) * scale;
+    if (s.type === "rect") {
+      const area = s.w * s.h * scale * scale;
+      if (s.cat === "condition2") {
+        const Lm = s.w * scale, Wm = s.h * scale, ch = roomCH(s.room);
+        return 2 * area + 2 * (Lm + Wm) * ch; // floor + ceiling + walls of the drawn zone
+      }
+      return area;
+    }
+    const len = lenOf(s);
+    if (s.cat === "wall_strip") return len * wallEffHeight(s);
+    return len;
   };
   const shapeLabel = (s) => {
-    const q = qtyOf(s);
+    if (!scale) return "no scale";
     if (s.cat === "containment") return "containment";
-    if (q === null) return "no scale";
-    return s.type === "rect" ? `${fmt(q)} m²` : `${fmt(q)} m`;
+    const q = qtyOf(s);
+    if (s.type === "rect") {
+      const L = s.w * scale, W = s.h * scale;
+      return `${fmt(L)}×${fmt(W)} m = ${fmt(q)} m²`;
+    }
+    if (s.cat === "wall_strip") {
+      const len = lenOf(s), ch = wallEffHeight(s);
+      return `${fmt(len)}×${fmt(ch)} m = ${fmt(q)} m²`;
+    }
+    return `${fmt(q)} m`;
   };
   const roomRows = () => {
     const ids = [...rooms.map((r) => r.id), null];
@@ -379,13 +412,45 @@ export default function App() {
       const room = rooms.find((r) => r.id === rid);
       const rs = shapes.filter((s) => (s.room ?? null) === rid);
       if (!room && rs.length === 0) return null;
-      const row = { name: room ? room.name : "Unassigned", ch: room ? room.ch : 2.4, isUnassigned: !room, counts: {}, any: rs.length > 0 };
+      const row = { name: room ? room.name : "Unassigned", ch: room ? room.ch : 2.4, isUnassigned: !room, counts: {}, wallLinm: 0, any: rs.length > 0 };
       for (const c of CATS) {
         const cs = rs.filter((s) => s.cat === c.id);
-        row.counts[c.id] = c.id === "containment" ? cs.length : cs.reduce((a, s) => a + (qtyOf(s) || 0), 0);
+        if (c.id === "containment") { row.counts[c.id] = cs.length; continue; }
+        if (c.id === "wall_strip") {
+          row.counts[c.id] = cs.reduce((a, s) => a + (qtyOf(s) || 0), 0); // m² (per-shape height)
+          row.wallLinm = cs.reduce((a, s) => a + (lenOf(s) || 0), 0);     // lm (informational)
+          continue;
+        }
+        row.counts[c.id] = cs.reduce((a, s) => a + (qtyOf(s) || 0), 0);
       }
       return row;
     }).filter(Boolean);
+  };
+  // Per-category display lines for the quantities panel — floor/ceiling strip each
+  // produce two labelled outputs from the same underlying figure (strip + matching decon).
+  const categoryLines = (c, row) => {
+    if (c.id === "containment") {
+      const v = row.counts.containment;
+      return v ? [{ label: "Containment set-up", text: `${v} ×` }] : [];
+    }
+    if (c.id === "wall_strip") {
+      const lm = row.wallLinm, m2 = row.counts.wall_strip;
+      return lm ? [{ label: "Wall strip", text: `${fmt(lm)} lm → ${fmt(m2)} m²` }] : [];
+    }
+    const v = row.counts[c.id];
+    if (!v) return [];
+    if (c.id === "floor_strip") return [
+      { label: "Floor lining strip", text: `${fmt(v)} m²` },
+      { label: "Subfloor decontamination", text: `${fmt(v)} m²` },
+    ];
+    if (c.id === "ceiling_strip") return [
+      { label: "Ceiling lining strip", text: `${fmt(v)} m²` },
+      { label: "Ceiling cavity decontamination", text: `${fmt(v)} m²` },
+    ];
+    if (c.id === "cabinetry") return [{ label: "Cabinetry strip", text: `${fmt(v)} m²` }];
+    if (c.id === "condition2") return [{ label: "Condition 2 clean (all surfaces)", text: `${fmt(v)} m²` }];
+    if (c.id === "contingent") return [{ label: "Contingent (provisional)", text: `${fmt(v)} m²` }];
+    return [{ label: c.label, text: `${fmt(v)} m²` }];
   };
 
   // ---------- export (real downloads — self-hosted, no sandbox; copy/paste modal kept for Cowork paste-in) ----------
@@ -395,15 +460,15 @@ export default function App() {
     exported_at: new Date().toISOString(),
     source: `bml-floorplan-markup ${APP_VERSION}`,
     calibration: scale ? { scale_m_per_px: scale, reference_px: calPx, reference_m: calPx * scale } : null,
-    markup_convention: "BML v2 (bml-floorplan-quantify-quote)",
-    condition2_model: "condition2_m2 = explicitly drawn C2 zones only (e.g. adjacent non-strip rooms). The pricing engine derives full-room-surface Condition 2 for every room with strip_room:true — do NOT also count drawn C2 in those rooms (no double-count).",
+    markup_convention: "BML v3.1 (bml-floorplan-quantify-quote)",
+    condition2_model: "condition2_m2 = the full computed surface (floor + ceiling + walls) of every drawn C2 zone, with NO netting of stripped/cavity areas — the drawn zone(s) set the remediation-zone extent for that room (can be part of a room). The engine must use this figure directly (affected_zone basis) and must not derive or net Condition 2 itself. 'Full strip' no longer exists as a category — floor_strip and ceiling_strip are drawn as separate overlays.",
     rooms: roomRows().filter((r) => !r.isUnassigned || r.any).map((r) => ({
       name: r.name, ceiling_height: r.ch,
-      strip_room: (r.counts.full_strip > 0 || r.counts.floor_strip > 0 || r.counts.ceiling_strip > 0 || r.counts.wall_strip > 0),
-      full_strip_m2: round2(r.counts.full_strip), floor_strip_m2: round2(r.counts.floor_strip),
+      strip_room: (r.counts.floor_strip > 0 || r.counts.ceiling_strip > 0 || r.counts.wall_strip > 0),
+      full_strip_m2: 0, floor_strip_m2: round2(r.counts.floor_strip),
       ceiling_strip_m2: round2(r.counts.ceiling_strip), condition2_m2: round2(r.counts.condition2),
       cabinetry_m2: round2(r.counts.cabinetry), contingent_m2: round2(r.counts.contingent),
-      wall_strip_linm: round2(r.counts.wall_strip), wall_strip_m2: round2(r.counts.wall_strip * r.ch),
+      wall_strip_linm: round2(r.wallLinm), wall_strip_m2: round2(r.counts.wall_strip),
       containment_count: r.counts.containment,
     })),
     flags: [
@@ -473,11 +538,20 @@ export default function App() {
       if (d.format !== "bml-markup-project") throw new Error("bad format");
       const id = view === "editor" && jobId ? jobId : String(Date.now());
       loadedRef.current = false;
+      // v3.1: legacy full_strip shapes convert to floor_strip (overlay ceiling separately);
+      // legacy wall_strip lines without a height default to "full" (room ceiling height).
+      let convertedFullStrip = false;
+      const shapes = (d.shapes || []).map((s) => {
+        let out = s;
+        if (out.cat === "full_strip") { out = { ...out, cat: "floor_strip" }; convertedFullStrip = true; }
+        if (out.cat === "wall_strip" && out.hgt == null) out = { ...out, hgt: "full" };
+        return out;
+      });
       setJobId(id); setJobName(d.jobName || ""); setRooms(d.rooms || []);
       setActiveRoom(d.rooms?.[0]?.id ?? null);
-      setShapes(d.shapes || []); setCalLine(d.calLine || null); setScale(d.scale ?? null);
+      setShapes(shapes); setCalLine(d.calLine || null); setScale(d.scale ?? null);
       setSelId(null); setUndoStack([]);
-      idRef.current = Math.max(1, ...(d.shapes || []).map((s) => s.id + 1), ...(d.rooms || []).map((x) => x.id + 1));
+      idRef.current = Math.max(1, ...shapes.map((s) => s.id + 1), ...(d.rooms || []).map((x) => x.id + 1));
       if (d.img?.src) {
         // legacy v2.1 project files with embedded image
         setImg(d.img);
@@ -499,7 +573,10 @@ export default function App() {
       setImportOpen(false); setImportText("");
       setView("editor");
       setSaveState("dirty"); // autosave writes it back into IndexedDB
-      if (!d.img?.src) alert("Markup restored. Now load the floor plan image (paste/drop/upload) — the same plan from the job folder. Markup will auto-align.");
+      const msgs = [];
+      if (convertedFullStrip) msgs.push("Legacy full-strip shapes were converted to floor strip — overlay ceiling strip separately.");
+      if (!d.img?.src) msgs.push("Markup restored. Now load the floor plan image (paste/drop/upload) — the same plan from the job folder. Markup will auto-align.");
+      if (msgs.length) alert(msgs.join("\n\n"));
     } catch { alert("Not a valid BML markup project file / JSON."); }
   };
 
@@ -678,15 +755,33 @@ export default function App() {
               </button>
             ))}
           </div>
+          {activeCat === "wall_strip" && (
+            <div style={st.row}>
+              <span style={st.meta}>New wall height:</span>
+              <select style={{ ...st.selectEl, flex: 1 }} value={String(wallHgt)}
+                onChange={(e) => setWallHgt(e.target.value === "full" ? "full" : parseFloat(e.target.value))}>
+                {HEIGHTS.map((h) => <option key={h.value} value={h.value}>{h.label}</option>)}
+              </select>
+            </div>
+          )}
           <div style={st.row}>
             <button style={btn(tool === "select")} onClick={() => setTool("select")}>Select / edit</button>
             <button style={btn(tool === "pan")} onClick={() => setTool("pan")}>Pan</button>
           </div>
           <div style={st.meta}>Shift = straight lines · Del = delete selected · Ctrl+Z = undo · scroll = zoom · space-drag = pan</div>
-          <div style={st.meta}>Blue C2 = extra/adjacent zones only — the engine auto-applies full-room Condition 2 to every strip room. Spot cuts: draw the ACTUAL cutout area (incl. your strip-past-contamination allowance) — quantities price what you draw.</div>
+          <div style={st.meta}>Blue C2 = draw the remediation zone (part-room is fine). Total = floor + ceiling + walls of the zone — no automatic netting of stripped areas. Spot cuts: draw the ACTUAL cutout area (incl. your strip-past-contamination allowance) — quantities price what you draw.</div>
           {sel && (
             <div style={st.selBox}>
               <div style={st.meta}>Selected: {catById(sel.cat).label} — {shapeLabel(sel)}</div>
+              {sel.cat === "wall_strip" && (
+                <div style={st.row}>
+                  <span style={st.meta}>Height:</span>
+                  <select style={{ ...st.selectEl, flex: 1 }} value={String(sel.hgt ?? "full")}
+                    onChange={(e) => { pushUndo(); const v = e.target.value === "full" ? "full" : parseFloat(e.target.value); setShapes((a) => a.map((s) => s.id === sel.id ? { ...s, hgt: v } : s)); }}>
+                    {HEIGHTS.map((h) => <option key={h.value} value={h.value}>{h.label}</option>)}
+                  </select>
+                </div>
+              )}
               <div style={st.row}>
                 <select style={{ ...st.selectEl, flex: 1 }} value={sel.room ?? ""}
                   onChange={(e) => { pushUndo(); const v = e.target.value ? Number(e.target.value) : null; setShapes((a) => a.map((s) => s.id === sel.id ? { ...s, room: v } : s)); }}>
@@ -706,21 +801,13 @@ export default function App() {
               <div style={{ fontWeight: 600, color: r.isUnassigned && r.any ? "#e8b34b" : "#e8e6e1" }}>
                 {r.name}{r.isUnassigned && r.any ? " ⚠" : ""} <span style={st.meta}>CH {r.ch} m</span>
               </div>
-              {CATS.map((c) => {
-                const v = r.counts[c.id];
-                if (!v) return null;
-                return (
-                  <div key={c.id} style={st.qLine}>
-                    <span style={{ ...st.swatch, background: c.color }} />
-                    <span style={{ flex: 1 }}>{c.label}</span>
-                    <span style={st.num}>
-                      {c.id === "containment" ? `${v} ×`
-                        : c.id === "wall_strip" ? `${fmt(v)} lm → ${fmt(v * r.ch)} m²`
-                        : `${fmt(v)} m²`}
-                    </span>
-                  </div>
-                );
-              })}
+              {CATS.map((c) => categoryLines(c, r).map((line, i) => (
+                <div key={`${c.id}-${i}`} style={st.qLine}>
+                  <span style={{ ...st.swatch, background: c.color }} />
+                  <span style={{ flex: 1 }}>{line.label}</span>
+                  <span style={st.num}>{line.text}</span>
+                </div>
+              )))}
             </div>
           ) : null)}
           {shapes.length === 0 && <div style={st.meta}>Nothing marked up yet.</div>}
