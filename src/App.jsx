@@ -1,8 +1,11 @@
 import React, { useState, useRef, useEffect, useCallback } from "react";
 import { listJobs, getJob, putJob, deleteJob as dbDeleteJob, getImageBlob, putImageBlob, dataURLToBlob, blobToDataURL } from "./db.js";
 
-// ---------- BML markup convention (v3.1 — mirrors bml-floorplan-quantify-quote) ----------
-// "Full strip" removed (v3.1): Jordan overlays floor_strip + ceiling_strip separately instead.
+// ---------- BML markup convention (v3.2 — mirrors bml-floorplan-quantify-quote) ----------
+// "Full strip" removed (v3.1): floor_strip + ceiling_strip drawn separately instead.
+// roof_void_decon / floor_protection (v3.2) are PROPERTY-SCOPE: room assignment is ignored,
+// they're excluded from every per-room row and from the UNASSIGNED flag, and are aggregated
+// globally into the Property-wide block / export.property block instead.
 const CATS = [
   { id: "floor_strip",   label: "Strip floor coverings + remediate subfloor surface",              kind: "fill", color: "#FF00FF" },
   { id: "ceiling_strip", label: "Strip ceiling linings + remediate cavity surfaces then contain",   kind: "fill", color: "#FFFF00" },
@@ -11,6 +14,8 @@ const CATS = [
   { id: "contingent",    label: "Contingent (provisional)",                                          kind: "fill", color: "#FF9900" },
   { id: "wall_strip",    label: "Wall strip",                                                        kind: "line", color: "#EE0000" },
   { id: "containment",   label: "Containment set-up",                                                kind: "line", color: "#4EA72E" },
+  { id: "roof_void_decon", label: "Roof void / ceiling cavity decontamination", kind: "fill", color: "#795548", propertyScope: true },
+  { id: "floor_protection", label: "Floor protection",                          kind: "fill", color: "#9E9E9E", propertyScope: true },
 ];
 const catById = (id) => CATS.find((c) => c.id === id);
 const FILL_OPACITY = 0.35;
@@ -23,8 +28,27 @@ const HEIGHTS = [
   { value: 0.6,    label: "600 mm" },
   { value: 0.3,    label: "300 mm" },
 ];
+const INSULATION_TYPES = [
+  { value: "batts",    label: "Batts" },
+  { value: "blown_in", label: "Blown-in fill" },
+];
+const ROOF_VOID_MODES = [
+  { value: "all_surfaces",     label: "All surfaces" },
+  { value: "visibly_affected", label: "Visibly affected only" },
+];
+const STORAGE_MODES = [
+  { value: "none",    label: "None" },
+  { value: "onsite",  label: "Onsite" },
+  { value: "offsite", label: "Offsite" },
+];
+const DEFAULT_PROPERTY = {
+  adf_units: "", adf_days: "", dehum_units: "", dehum_days: "", dbkii_days: "",
+  ac_ducted_units: "", ac_split_units: "", prv_areas: "",
+  contents_packout: false, contents_inventory: false, skip_bin: false, asbestos_testing: false,
+  contents_storage: "none", roof_void_mode: "all_surfaces",
+};
 
-const APP_VERSION = "v3.1";
+const APP_VERSION = "v3.2";
 const BUILD_DATE = typeof __BUILD_DATE__ !== "undefined" ? __BUILD_DATE__ : "";
 
 export default function App() {
@@ -41,12 +65,17 @@ export default function App() {
   const [pan, setPan] = useState({ x: 0, y: 0 });
   // job + rooms
   const [jobName, setJobName] = useState("");
-  const [rooms, setRooms] = useState([]); // {id, name, ch}
+  const [rooms, setRooms] = useState([]); // {id, name, ch, plumbIso, elecIso}
   const [activeRoom, setActiveRoom] = useState(null);
   // tools
   const [tool, setTool] = useState("select");
   const [activeCat, setActiveCat] = useState("floor_strip");
   const [wallHgt, setWallHgt] = useState("full"); // default removal height for NEW wall_strip lines
+  const [wallCornice, setWallCornice] = useState(false);
+  const [wallSkirting, setWallSkirting] = useState(false);
+  const [wallSkirtingOnly, setWallSkirtingOnly] = useState(false);
+  const [roofInsulation, setRoofInsulation] = useState(false);
+  const [roofInsulationType, setRoofInsulationType] = useState("batts");
   // shapes
   const [shapes, setShapes] = useState([]);
   const [selId, setSelId] = useState(null);
@@ -57,6 +86,13 @@ export default function App() {
   const [calUnit, setCalUnit] = useState("m");
   const [scale, setScale] = useState(null);
   const [measure, setMeasure] = useState(null);
+  // property-wide scope (v3.2 — quantities/checkboxes only, never priced)
+  const [property, setProperty] = useState(DEFAULT_PROPERTY);
+  // visibility toggles (cosmetic only — canvas display, never affects quantities/export)
+  const [hiddenCats, setHiddenCats] = useState(() => new Set());
+  const [hiddenRooms, setHiddenRooms] = useState(() => new Set());
+  // collapsible panel sections (not persisted)
+  const [collapsed, setCollapsed] = useState({});
   // export / import modals (copy/paste kept for Cowork paste-in convenience)
   const [exportModal, setExportModal] = useState(null); // {title, hint, text, filename}
   const [importOpen, setImportOpen] = useState(false);
@@ -84,6 +120,8 @@ export default function App() {
     setShapes([]); setCalLine(null); setScale(null); setSelId(null); setUndoStack([]);
     setImg(null); idRef.current = 1; loadedRef.current = true;
     pendingRescale.current = null;
+    setProperty(DEFAULT_PROPERTY);
+    setHiddenCats(new Set()); setHiddenRooms(new Set());
     setSaveState("idle"); setView("editor");
   };
 
@@ -101,6 +139,8 @@ export default function App() {
     setActiveRoom(meta.rooms?.[0]?.id ?? null);
     setShapes(meta.shapes || []); setCalLine(meta.calLine || null); setScale(meta.scale ?? null);
     setSelId(null); setUndoStack([]);
+    setProperty({ ...DEFAULT_PROPERTY, ...(meta.property || {}) });
+    setHiddenCats(new Set()); setHiddenRooms(new Set());
     pendingRescale.current = null;
     idRef.current = Math.max(1, ...(meta.shapes || []).map((s) => s.id + 1), ...(meta.rooms || []).map((r) => r.id + 1));
     if (src && meta.imgW) {
@@ -122,7 +162,7 @@ export default function App() {
     setSaveState("saving");
     try {
       const meta = {
-        id: jobId, name: jobName, rooms, shapes, calLine, scale,
+        id: jobId, name: jobName, rooms, shapes, calLine, scale, property,
         imgW: imgW ?? img?.w ?? 0, imgH: imgH ?? img?.h ?? 0,
         savedAt: new Date().toISOString(),
       };
@@ -131,7 +171,7 @@ export default function App() {
       setIndex((prev) => [entry, ...prev.filter((j) => j.id !== jobId)]);
       setSaveState("saved");
     } catch { setSaveState("error"); }
-  }, [storageOk, jobId, jobName, rooms, shapes, calLine, scale, img]);
+  }, [storageOk, jobId, jobName, rooms, shapes, calLine, scale, property, img]);
 
   // autosave (debounced) on any markup change
   useEffect(() => {
@@ -140,7 +180,7 @@ export default function App() {
     clearTimeout(saveTimer.current);
     saveTimer.current = setTimeout(() => persistMeta(), 1200);
     return () => clearTimeout(saveTimer.current);
-  }, [shapes, rooms, jobName, scale, calLine]); // eslint-disable-line
+  }, [shapes, rooms, jobName, scale, calLine, property]); // eslint-disable-line
 
   // ---------- image input (compress -> persist as Blob) ----------
   const loadImageFile = (file) => {
@@ -250,9 +290,10 @@ export default function App() {
       const cat = catById(activeCat);
       pushUndo();
       const s = cat.kind === "fill"
-        ? { id: nid(), type: "rect", cat: cat.id, room: activeRoom, x: pt.x, y: pt.y, w: 0, h: 0 }
+        ? { id: nid(), type: "rect", cat: cat.id, room: activeRoom, x: pt.x, y: pt.y, w: 0, h: 0,
+            ...(cat.id === "roof_void_decon" ? { insulation: roofInsulation, insulationType: roofInsulationType } : {}) }
         : { id: nid(), type: "line", cat: cat.id, room: activeRoom, x1: pt.x, y1: pt.y, x2: pt.x, y2: pt.y,
-            ...(cat.id === "wall_strip" ? { hgt: wallHgt } : {}) };
+            ...(cat.id === "wall_strip" ? { hgt: wallHgt, cornice: wallCornice, skirting: wallSkirting, skirtingOnly: wallSkirtingOnly } : {}) };
       setShapes((a) => [...a, s]);
       drag.current = { mode: "new", id: s.id, sx: pt.x, sy: pt.y };
       return;
@@ -372,12 +413,13 @@ export default function App() {
 
   // ---------- quantities ----------
   const fmt = (v, d = 2) => v.toLocaleString("en-AU", { minimumFractionDigits: d, maximumFractionDigits: d });
-  const roomCH = (roomId) => rooms.find((r) => r.id === roomId)?.ch ?? 2.4;
+  const chOf = (room) => parseFloat(room?.ch) || 2.4; // room.ch is stored as a raw string (decimal-entry fix, v3.2)
+  const roomCH = (roomId) => chOf(rooms.find((r) => r.id === roomId));
   const wallEffHeight = (s) => (s.hgt === "full" || s.hgt == null ? roomCH(s.room) : s.hgt);
-  const lenOf = (s) => Math.hypot(s.x2 - s.x1, s.y2 - s.y1) * scale; // raw line length in m (wall_strip linm tracking)
+  const lenOf = (s) => Math.hypot(s.x2 - s.x1, s.y2 - s.y1) * scale; // raw line length in m
   // Primary priced quantity per shape. Rects: footprint m² (condition2 = full zone surface,
-  // no netting of stripped areas — v3.1). Lines: wall_strip m² via its own removal height;
-  // containment is counted, not measured (handled in roomRows).
+  // no netting of stripped areas — v3.1). Wall lines: m² via their own removal height, unless
+  // skirting-only (no wall lining, contributes 0 — skirting lm is tracked separately in roomRows).
   const qtyOf = (s) => {
     if (!scale) return null;
     if (s.type === "rect") {
@@ -389,12 +431,13 @@ export default function App() {
       return area;
     }
     const len = lenOf(s);
-    if (s.cat === "wall_strip") return len * wallEffHeight(s);
+    if (s.cat === "wall_strip") return s.skirtingOnly ? 0 : len * wallEffHeight(s);
     return len;
   };
   const shapeLabel = (s) => {
     if (!scale) return "no scale";
     if (s.cat === "containment") return "containment";
+    if (s.cat === "wall_strip" && s.skirtingOnly) return `${fmt(lenOf(s))} m skirting`;
     const q = qtyOf(s);
     if (s.type === "rect") {
       const L = s.w * scale, W = s.h * scale;
@@ -410,21 +453,37 @@ export default function App() {
     const ids = [...rooms.map((r) => r.id), null];
     return ids.map((rid) => {
       const room = rooms.find((r) => r.id === rid);
-      const rs = shapes.filter((s) => (s.room ?? null) === rid);
+      // property-scope shapes (roof void / floor protection) never belong to a per-room row
+      const rs = shapes.filter((s) => (s.room ?? null) === rid && !catById(s.cat)?.propertyScope);
       if (!room && rs.length === 0) return null;
-      const row = { name: room ? room.name : "Unassigned", ch: room ? room.ch : 2.4, isUnassigned: !room, counts: {}, wallLinm: 0, any: rs.length > 0 };
+      const row = {
+        name: room ? room.name : "Unassigned", ch: room ? chOf(room) : 2.4, isUnassigned: !room,
+        plumbIso: room ? !!room.plumbIso : false, elecIso: room ? !!room.elecIso : false,
+        counts: {}, wallLinm: 0, corniceLinm: 0, skirtingLinm: 0, any: rs.length > 0,
+      };
       for (const c of CATS) {
         const cs = rs.filter((s) => s.cat === c.id);
         if (c.id === "containment") { row.counts[c.id] = cs.length; continue; }
         if (c.id === "wall_strip") {
-          row.counts[c.id] = cs.reduce((a, s) => a + (qtyOf(s) || 0), 0); // m² (per-shape height)
-          row.wallLinm = cs.reduce((a, s) => a + (lenOf(s) || 0), 0);     // lm (informational)
+          row.counts[c.id] = cs.reduce((a, s) => a + (qtyOf(s) || 0), 0); // m² (0 for skirting-only)
+          row.wallLinm = cs.filter((s) => !s.skirtingOnly).reduce((a, s) => a + (lenOf(s) || 0), 0);
+          row.corniceLinm = cs.filter((s) => s.cornice && !s.skirtingOnly).reduce((a, s) => a + (lenOf(s) || 0), 0);
+          row.skirtingLinm = cs.filter((s) => s.skirtingOnly || s.skirting).reduce((a, s) => a + (lenOf(s) || 0), 0);
           continue;
         }
         row.counts[c.id] = cs.reduce((a, s) => a + (qtyOf(s) || 0), 0);
       }
       return row;
     }).filter(Boolean);
+  };
+  // Global totals for the two property-scope drawn categories (room assignment ignored).
+  const computePropertyTotals = () => {
+    const roofShapes = shapes.filter((s) => s.cat === "roof_void_decon");
+    const decon_m2 = roofShapes.reduce((a, s) => a + (qtyOf(s) || 0), 0);
+    const insBatts = roofShapes.filter((s) => s.insulation && s.insulationType === "batts").reduce((a, s) => a + (qtyOf(s) || 0), 0);
+    const insBlown = roofShapes.filter((s) => s.insulation && s.insulationType === "blown_in").reduce((a, s) => a + (qtyOf(s) || 0), 0);
+    const floorProt = shapes.filter((s) => s.cat === "floor_protection").reduce((a, s) => a + (qtyOf(s) || 0), 0);
+    return { decon_m2, insBatts, insBlown, floorProt };
   };
   // Per-category display lines for the quantities panel — floor/ceiling strip each
   // produce two labelled outputs from the same underlying figure (strip + matching decon).
@@ -434,8 +493,11 @@ export default function App() {
       return v ? [{ label: "Containment set-up", text: `${v} ×` }] : [];
     }
     if (c.id === "wall_strip") {
-      const lm = row.wallLinm, m2 = row.counts.wall_strip;
-      return lm ? [{ label: "Wall strip", text: `${fmt(lm)} lm → ${fmt(m2)} m²` }] : [];
+      const lines = [];
+      if (row.wallLinm) lines.push({ label: "Wall strip", text: `${fmt(row.wallLinm)} lm → ${fmt(row.counts.wall_strip)} m²` });
+      if (row.corniceLinm) lines.push({ label: "Cornice removal", text: `${fmt(row.corniceLinm)} lm` });
+      if (row.skirtingLinm) lines.push({ label: "Skirting removal", text: `${fmt(row.skirtingLinm)} lm` });
+      return lines;
     }
     const v = row.counts[c.id];
     if (!v) return [];
@@ -453,29 +515,85 @@ export default function App() {
     return [{ label: c.label, text: `${fmt(v)} m²` }];
   };
 
+  // ---------- visibility toggles (cosmetic only) ----------
+  const toggleHiddenCat = (id) => setHiddenCats((s) => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n; });
+  const toggleHiddenRoom = (id) => setHiddenRooms((s) => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n; });
+  const showAll = () => { setHiddenCats(new Set()); setHiddenRooms(new Set()); };
+
+  // ---------- collapsible sections ----------
+  const toggleSection = (id) => setCollapsed((c) => ({ ...c, [id]: !c[id] }));
+  const sectionHead = (id, title) => (
+    <div style={{ ...st.h, cursor: "pointer", userSelect: "none" }} onClick={() => toggleSection(id)}>
+      {collapsed[id] ? "▸" : "▾"} {title}
+    </div>
+  );
+
+  // ---------- property scope field helpers ----------
+  const setProp = (k, v) => setProperty((p) => ({ ...p, [k]: v }));
+  const propNumField = (label, k) => (
+    <label key={k} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 11.5, gap: 4 }}>
+      {label}
+      <input value={property[k]} onChange={(e) => setProp(k, e.target.value)} inputMode="decimal"
+        style={{ width: 46, background: "#15171b", border: "1px solid #2b2f37", color: "#e8e6e1", borderRadius: 4, padding: "2px 4px", textAlign: "right", fontSize: 11.5 }} />
+    </label>
+  );
+  const propCheckField = (label, k) => (
+    <label key={k} style={{ display: "flex", gap: 5, alignItems: "center", fontSize: 11.5 }}>
+      <input type="checkbox" checked={!!property[k]} onChange={(e) => setProp(k, e.target.checked)} /> {label}
+    </label>
+  );
+  const qline = (label, text, color) => (
+    <div key={label} style={st.qLine}>
+      {color ? <span style={{ ...st.swatch, background: color }} /> : <span style={{ width: 12 }} />}
+      <span style={{ flex: 1 }}>{label}</span>
+      <span style={st.num}>{text}</span>
+    </div>
+  );
+
   // ---------- export (real downloads — self-hosted, no sandbox; copy/paste modal kept for Cowork paste-in) ----------
   const round2 = (v) => Math.round(v * 100) / 100;
-  const buildExport = () => ({
-    job: jobName || "UNNAMED JOB",
-    exported_at: new Date().toISOString(),
-    source: `bml-floorplan-markup ${APP_VERSION}`,
-    calibration: scale ? { scale_m_per_px: scale, reference_px: calPx, reference_m: calPx * scale } : null,
-    markup_convention: "BML v3.1 (bml-floorplan-quantify-quote)",
-    condition2_model: "condition2_m2 = the full computed surface (floor + ceiling + walls) of every drawn C2 zone, with NO netting of stripped/cavity areas — the drawn zone(s) set the remediation-zone extent for that room (can be part of a room). The engine must use this figure directly (affected_zone basis) and must not derive or net Condition 2 itself. 'Full strip' no longer exists as a category — floor_strip and ceiling_strip are drawn as separate overlays.",
-    rooms: roomRows().filter((r) => !r.isUnassigned || r.any).map((r) => ({
-      name: r.name, ceiling_height: r.ch,
-      strip_room: (r.counts.floor_strip > 0 || r.counts.ceiling_strip > 0 || r.counts.wall_strip > 0),
-      full_strip_m2: 0, floor_strip_m2: round2(r.counts.floor_strip),
-      ceiling_strip_m2: round2(r.counts.ceiling_strip), condition2_m2: round2(r.counts.condition2),
-      cabinetry_m2: round2(r.counts.cabinetry), contingent_m2: round2(r.counts.contingent),
-      wall_strip_linm: round2(r.wallLinm), wall_strip_m2: round2(r.counts.wall_strip),
-      containment_count: r.counts.containment,
-    })),
-    flags: [
-      ...(shapes.some((s) => s.room == null) ? ["UNASSIGNED shapes present — reassign before pricing"] : []),
-      ...(!scale ? ["NOT CALIBRATED — quantities invalid"] : []),
-    ],
-  });
+  const buildExport = () => {
+    const pt = computePropertyTotals();
+    return {
+      job: jobName || "UNNAMED JOB",
+      exported_at: new Date().toISOString(),
+      source: `bml-floorplan-markup ${APP_VERSION}`,
+      pricing: "QUANTITIES ONLY — this tool never applies rates or pricing. Any pricing engine consumes this JSON.",
+      calibration: scale ? { scale_m_per_px: scale, reference_px: calPx, reference_m: calPx * scale } : null,
+      markup_convention: "BML v3.2 (bml-floorplan-quantify-quote)",
+      condition2_model: "condition2_m2 = the full computed surface (floor + ceiling + walls) of every drawn C2 zone, with NO netting of stripped/cavity areas — the drawn zone(s) set the remediation-zone extent for that room (can be part of a room). The engine must use this figure directly (affected_zone basis) and must not derive or net Condition 2 itself. 'Full strip' no longer exists as a category — floor_strip and ceiling_strip are drawn as separate overlays.",
+      rooms: roomRows().filter((r) => !r.isUnassigned || r.any).map((r) => ({
+        name: r.name, ceiling_height: r.ch,
+        strip_room: (r.counts.floor_strip > 0 || r.counts.ceiling_strip > 0 || r.counts.wall_strip > 0),
+        full_strip_m2: 0, floor_strip_m2: round2(r.counts.floor_strip),
+        ceiling_strip_m2: round2(r.counts.ceiling_strip), condition2_m2: round2(r.counts.condition2),
+        cabinetry_m2: round2(r.counts.cabinetry), contingent_m2: round2(r.counts.contingent),
+        wall_strip_linm: round2(r.wallLinm), wall_strip_m2: round2(r.counts.wall_strip),
+        cornice_linm: round2(r.corniceLinm), skirting_linm: round2(r.skirtingLinm),
+        containment_count: r.counts.containment,
+        plumbing_iso: r.plumbIso, electrical_iso: r.elecIso,
+      })),
+      property: {
+        adf_units: parseFloat(property.adf_units) || 0, adf_days: parseFloat(property.adf_days) || 0,
+        dehum_units: parseFloat(property.dehum_units) || 0, dehum_days: parseFloat(property.dehum_days) || 0,
+        dbkii_days: parseFloat(property.dbkii_days) || 0,
+        ac_ducted_units: parseFloat(property.ac_ducted_units) || 0, ac_split_units: parseFloat(property.ac_split_units) || 0,
+        prv_areas: parseFloat(property.prv_areas) || 0,
+        contents_packout: !!property.contents_packout, contents_inventory: !!property.contents_inventory,
+        contents_storage: property.contents_storage,
+        skip_bin: !!property.skip_bin, asbestos_testing: !!property.asbestos_testing,
+        roof_void: {
+          decon_m2: round2(pt.decon_m2), decon_mode: property.roof_void_mode,
+          insulation_batts_m2: round2(pt.insBatts), insulation_blown_m2: round2(pt.insBlown),
+        },
+        floor_protection_m2: round2(pt.floorProt),
+      },
+      flags: [
+        ...(shapes.some((s) => s.room == null && !catById(s.cat)?.propertyScope) ? ["UNASSIGNED shapes present — reassign before pricing"] : []),
+        ...(!scale ? ["NOT CALIBRATED — quantities invalid"] : []),
+      ],
+    };
+  };
 
   const downloadFile = (filename, text) => {
     const blob = new Blob([text], { type: "application/json" });
@@ -501,10 +619,10 @@ export default function App() {
   const exportProject = () => {
     const filename = `${(jobName || "job").replace(/\s+/g, "_")}_markup_PROJECT.json`;
     const data = {
-      format: "bml-markup-project", version: 2, image_embedded: false,
+      format: "bml-markup-project", version: 3, image_embedded: false,
       savedAt: new Date().toISOString(),
       imgW: img?.w || 0, imgH: img?.h || 0,
-      jobName, rooms, shapes, calLine, scale,
+      jobName, rooms, shapes, calLine, scale, property,
     };
     const text = JSON.stringify(data);
     downloadFile(filename, text);
@@ -551,6 +669,8 @@ export default function App() {
       setActiveRoom(d.rooms?.[0]?.id ?? null);
       setShapes(shapes); setCalLine(d.calLine || null); setScale(d.scale ?? null);
       setSelId(null); setUndoStack([]);
+      setProperty({ ...DEFAULT_PROPERTY, ...(d.property || {}) });
+      setHiddenCats(new Set()); setHiddenRooms(new Set());
       idRef.current = Math.max(1, ...shapes.map((s) => s.id + 1), ...(d.rooms || []).map((x) => x.id + 1));
       if (d.img?.src) {
         // legacy v2.1 project files with embedded image
@@ -591,7 +711,7 @@ export default function App() {
   const [newRoom, setNewRoom] = useState("");
   const addRoom = () => {
     const n = newRoom.trim(); if (!n) return;
-    const r = { id: nid(), name: n, ch: 2.4 };
+    const r = { id: nid(), name: n, ch: "2.4", plumbIso: false, elecIso: false };
     setRooms((a) => [...a, r]); setActiveRoom(r.id); setNewRoom("");
   };
 
@@ -678,6 +798,13 @@ export default function App() {
     );
   }
 
+  const propertyTotals = computePropertyTotals();
+  const anyPropertyEntered = propertyTotals.decon_m2 > 0 || propertyTotals.insBatts > 0 || propertyTotals.insBlown > 0 ||
+    propertyTotals.floorProt > 0 || parseFloat(property.adf_units) > 0 || parseFloat(property.dehum_units) > 0 ||
+    parseFloat(property.dbkii_days) > 0 || parseFloat(property.ac_ducted_units) > 0 || parseFloat(property.ac_split_units) > 0 ||
+    parseFloat(property.prv_areas) > 0 || property.contents_packout || property.contents_inventory ||
+    property.skip_bin || property.asbestos_testing || property.contents_storage !== "none";
+
   // ================= EDITOR =================
   return (
     <div style={st.app}>
@@ -700,117 +827,266 @@ export default function App() {
         )}
 
         <div style={st.section}>
-          <div style={st.h}>1 · Calibrate</div>
-          <button style={btn(tool === "calibrate")} onClick={() => setTool("calibrate")} disabled={!img}>
-            Draw calibration line along a known wall
-          </button>
-          {calLine && (
-            <div style={st.row}>
-              <input style={{ ...st.input, flex: 1 }} placeholder="Wall length" value={calInput} onChange={(e) => setCalInput(e.target.value)} inputMode="decimal" />
-              <select style={st.selectEl} value={calUnit} onChange={(e) => setCalUnit(e.target.value)}>
-                <option value="m">m</option><option value="mm">mm</option>
-              </select>
-              <button style={btn(false)} onClick={applyScale}>Set</button>
-            </div>
-          )}
-          <div style={st.meta}>
-            {scale
-              ? <>Scale locked: 1 px = {fmt(scale * 1000, 1)} mm. Cross-check with Measure before drawing.</>
-              : <span style={{ color: "#e8b34b" }}>Not calibrated — quantities disabled.</span>}
-          </div>
-          <button style={btn(tool === "measure")} onClick={() => setTool("measure")} disabled={!scale}>
-            Measure (check tool){measure && scale ? ` — ${fmt(measLen * scale)} m` : ""}
-          </button>
-        </div>
-
-        <div style={st.section}>
-          <div style={st.h}>2 · Rooms</div>
-          <div style={st.row}>
-            <input style={{ ...st.input, flex: 1 }} placeholder="Add room…" value={newRoom}
-              onChange={(e) => setNewRoom(e.target.value)} onKeyDown={(e) => e.key === "Enter" && addRoom()} />
-            <button style={btn(false)} onClick={addRoom}>Add</button>
-          </div>
-          {rooms.map((r) => (
-            <div key={r.id} style={{ ...st.roomRow, outline: activeRoom === r.id ? "1px solid #6ea8fe" : "none" }}
-              onClick={() => setActiveRoom(r.id)}>
-              <span style={{ flex: 1 }}>{r.name}</span>
-              <span style={st.meta}>CH</span>
-              <input style={st.chInput} value={r.ch}
-                onClick={(e) => e.stopPropagation()}
-                onChange={(e) => setRooms((a) => a.map((x) => x.id === r.id ? { ...x, ch: parseFloat(e.target.value) || 0 } : x))} />
-              <span style={st.meta}>m</span>
-            </div>
-          ))}
-          <div style={st.meta}>Active room is tagged onto every new shape.</div>
-        </div>
-
-        <div style={st.section}>
-          <div style={st.h}>3 · Mark up scope</div>
-          <div style={st.chips}>
-            {CATS.map((c) => (
-              <button key={c.id} style={chip(c, tool === "draw" && activeCat === c.id)}
-                onClick={() => { setActiveCat(c.id); setTool("draw"); }} disabled={!img}>
-                <span style={{ ...st.swatch, background: c.color, opacity: c.kind === "fill" ? 0.8 : 1, height: c.kind === "line" ? 3 : 12 }} />
-                {c.label}
+          {sectionHead("cal", "1 · Calibrate")}
+          {!collapsed.cal && (
+            <>
+              <button style={btn(tool === "calibrate")} onClick={() => setTool("calibrate")} disabled={!img}>
+                Draw calibration line along a known wall
               </button>
-            ))}
-          </div>
-          {activeCat === "wall_strip" && (
-            <div style={st.row}>
-              <span style={st.meta}>New wall height:</span>
-              <select style={{ ...st.selectEl, flex: 1 }} value={String(wallHgt)}
-                onChange={(e) => setWallHgt(e.target.value === "full" ? "full" : parseFloat(e.target.value))}>
-                {HEIGHTS.map((h) => <option key={h.value} value={h.value}>{h.label}</option>)}
-              </select>
-            </div>
-          )}
-          <div style={st.row}>
-            <button style={btn(tool === "select")} onClick={() => setTool("select")}>Select / edit</button>
-            <button style={btn(tool === "pan")} onClick={() => setTool("pan")}>Pan</button>
-          </div>
-          <div style={st.meta}>Shift = straight lines · Del = delete selected · Ctrl+Z = undo · scroll = zoom · space-drag = pan</div>
-          <div style={st.meta}>Blue C2 = draw the remediation zone (part-room is fine). Total = floor + ceiling + walls of the zone — no automatic netting of stripped areas. Spot cuts: draw the ACTUAL cutout area (incl. your strip-past-contamination allowance) — quantities price what you draw.</div>
-          {sel && (
-            <div style={st.selBox}>
-              <div style={st.meta}>Selected: {catById(sel.cat).label} — {shapeLabel(sel)}</div>
-              {sel.cat === "wall_strip" && (
+              {calLine && (
                 <div style={st.row}>
-                  <span style={st.meta}>Height:</span>
-                  <select style={{ ...st.selectEl, flex: 1 }} value={String(sel.hgt ?? "full")}
-                    onChange={(e) => { pushUndo(); const v = e.target.value === "full" ? "full" : parseFloat(e.target.value); setShapes((a) => a.map((s) => s.id === sel.id ? { ...s, hgt: v } : s)); }}>
-                    {HEIGHTS.map((h) => <option key={h.value} value={h.value}>{h.label}</option>)}
+                  <input style={{ ...st.input, flex: 1 }} placeholder="Wall length" value={calInput} onChange={(e) => setCalInput(e.target.value)} inputMode="decimal" />
+                  <select style={st.selectEl} value={calUnit} onChange={(e) => setCalUnit(e.target.value)}>
+                    <option value="m">m</option><option value="mm">mm</option>
                   </select>
+                  <button style={btn(false)} onClick={applyScale}>Set</button>
+                </div>
+              )}
+              <div style={st.meta}>
+                {scale
+                  ? <>Scale locked: 1 px = {fmt(scale * 1000, 1)} mm. Cross-check with Measure before drawing.</>
+                  : <span style={{ color: "#e8b34b" }}>Not calibrated — quantities disabled.</span>}
+              </div>
+              <button style={btn(tool === "measure")} onClick={() => setTool("measure")} disabled={!scale}>
+                Measure (check tool){measure && scale ? ` — ${fmt(measLen * scale)} m` : ""}
+              </button>
+            </>
+          )}
+        </div>
+
+        <div style={st.section}>
+          {sectionHead("rooms", "2 · Rooms")}
+          {!collapsed.rooms && (
+            <>
+              <div style={st.row}>
+                <input style={{ ...st.input, flex: 1 }} placeholder="Add room…" value={newRoom}
+                  onChange={(e) => setNewRoom(e.target.value)} onKeyDown={(e) => e.key === "Enter" && addRoom()} />
+                <button style={btn(false)} onClick={addRoom}>Add</button>
+              </div>
+              {rooms.map((r) => (
+                <div key={r.id} style={{ ...st.roomRow, outline: activeRoom === r.id ? "1px solid #6ea8fe" : "none", opacity: hiddenRooms.has(r.id) ? 0.55 : 1 }}
+                  onClick={() => setActiveRoom(r.id)}>
+                  <input value={r.name} onClick={(e) => e.stopPropagation()}
+                    onChange={(e) => setRooms((a) => a.map((x) => x.id === r.id ? { ...x, name: e.target.value } : x))}
+                    style={{ flex: 1, minWidth: 0, background: "transparent", border: "none", borderBottom: "1px dashed #3a3f49", color: "#e8e6e1", fontSize: 13, padding: "2px 0" }} />
+                  <span style={st.meta}>CH</span>
+                  <input style={st.chInput} value={r.ch}
+                    onClick={(e) => e.stopPropagation()}
+                    onChange={(e) => setRooms((a) => a.map((x) => x.id === r.id ? { ...x, ch: e.target.value } : x))} />
+                  <span style={st.meta}>m</span>
+                  <label title="Plumbing isolation" onClick={(e) => e.stopPropagation()} style={{ display: "flex", alignItems: "center", gap: 2, fontSize: 10.5, color: "#8b909a" }}>
+                    <input type="checkbox" checked={!!r.plumbIso}
+                      onChange={(e) => setRooms((a) => a.map((x) => x.id === r.id ? { ...x, plumbIso: e.target.checked } : x))} />PL
+                  </label>
+                  <label title="Electrical isolation" onClick={(e) => e.stopPropagation()} style={{ display: "flex", alignItems: "center", gap: 2, fontSize: 10.5, color: "#8b909a" }}>
+                    <input type="checkbox" checked={!!r.elecIso}
+                      onChange={(e) => setRooms((a) => a.map((x) => x.id === r.id ? { ...x, elecIso: e.target.checked } : x))} />EL
+                  </label>
+                  <span title="Toggle this room's shapes on canvas" style={{ cursor: "pointer", opacity: hiddenRooms.has(r.id) ? 1 : 0.5 }}
+                    onClick={(e) => { e.stopPropagation(); toggleHiddenRoom(r.id); }}>👁</span>
+                </div>
+              ))}
+              <div style={st.meta}>Active room is tagged onto every new shape.</div>
+            </>
+          )}
+        </div>
+
+        <div style={st.section}>
+          {sectionHead("markup", "3 · Mark up scope")}
+          {!collapsed.markup && (
+            <>
+              <div style={st.chips}>
+                {CATS.map((c) => (
+                  <button key={c.id} style={chip(c, tool === "draw" && activeCat === c.id)}
+                    onClick={() => { setActiveCat(c.id); setTool("draw"); }} disabled={!img}>
+                    <span style={{ ...st.swatch, background: c.color, opacity: (c.kind === "fill" ? 0.8 : 1) * (hiddenCats.has(c.id) ? 0.35 : 1), height: c.kind === "line" ? 3 : 12 }} />
+                    <span style={{ opacity: hiddenCats.has(c.id) ? 0.5 : 1 }}>{c.label}</span>
+                    <span onClick={(e) => { e.stopPropagation(); toggleHiddenCat(c.id); }} title="Toggle visibility on canvas"
+                      style={{ marginLeft: 2, opacity: hiddenCats.has(c.id) ? 1 : 0.5, cursor: "pointer" }}>👁</span>
+                  </button>
+                ))}
+              </div>
+              {activeCat === "wall_strip" && (
+                <div style={st.selBox}>
+                  <div style={st.row}>
+                    <span style={st.meta}>New wall height:</span>
+                    <select style={{ ...st.selectEl, flex: 1 }} value={String(wallHgt)}
+                      onChange={(e) => setWallHgt(e.target.value === "full" ? "full" : parseFloat(e.target.value))} disabled={wallSkirtingOnly}>
+                      {HEIGHTS.map((h) => <option key={h.value} value={h.value}>{h.label}</option>)}
+                    </select>
+                  </div>
+                  <label style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 11.5 }}>
+                    <input type="checkbox" checked={wallCornice} disabled={wallSkirtingOnly} onChange={(e) => setWallCornice(e.target.checked)} /> Include cornice
+                  </label>
+                  <label style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 11.5 }}>
+                    <input type="checkbox" checked={wallSkirting} onChange={(e) => setWallSkirting(e.target.checked)} /> Include skirting
+                  </label>
+                  <label style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 11.5 }}>
+                    <input type="checkbox" checked={wallSkirtingOnly} onChange={(e) => setWallSkirtingOnly(e.target.checked)} /> Skirting only (no wall lining)
+                  </label>
+                </div>
+              )}
+              {activeCat === "roof_void_decon" && (
+                <div style={st.selBox}>
+                  <label style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 11.5 }}>
+                    <input type="checkbox" checked={roofInsulation} onChange={(e) => setRoofInsulation(e.target.checked)} /> Include insulation removal
+                  </label>
+                  {roofInsulation && (
+                    <div style={st.row}>
+                      <span style={st.meta}>Insulation type:</span>
+                      <select style={{ ...st.selectEl, flex: 1 }} value={roofInsulationType} onChange={(e) => setRoofInsulationType(e.target.value)}>
+                        {INSULATION_TYPES.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}
+                      </select>
+                    </div>
+                  )}
                 </div>
               )}
               <div style={st.row}>
-                <select style={{ ...st.selectEl, flex: 1 }} value={sel.room ?? ""}
-                  onChange={(e) => { pushUndo(); const v = e.target.value ? Number(e.target.value) : null; setShapes((a) => a.map((s) => s.id === sel.id ? { ...s, room: v } : s)); }}>
-                  <option value="">Unassigned</option>
-                  {rooms.map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
-                </select>
-                <button style={btn(false)} onClick={() => { pushUndo(); setShapes((a) => a.filter((s) => s.id !== sel.id)); setSelId(null); }}>Delete</button>
+                <button style={btn(tool === "select")} onClick={() => setTool("select")}>Select / edit</button>
+                <button style={btn(tool === "pan")} onClick={() => setTool("pan")}>Pan</button>
+                <button style={btn(false)} onClick={showAll}>Show all</button>
               </div>
-            </div>
+              <div style={st.meta}>Shift = straight lines · Del = delete selected · Ctrl+Z = undo · scroll = zoom · space-drag = pan</div>
+              <div style={st.meta}>Blue C2 = draw the remediation zone (part-room is fine). Total = floor + ceiling + walls of the zone — no automatic netting of stripped areas. Spot cuts: draw the ACTUAL cutout area (incl. your strip-past-contamination allowance) — quantities price what you draw.</div>
+              {sel && (
+                <div style={st.selBox}>
+                  <div style={st.meta}>Selected: {catById(sel.cat).label} — {shapeLabel(sel)}</div>
+                  {sel.cat === "wall_strip" && (
+                    <>
+                      <div style={st.row}>
+                        <span style={st.meta}>Height:</span>
+                        <select style={{ ...st.selectEl, flex: 1 }} value={String(sel.hgt ?? "full")} disabled={!!sel.skirtingOnly}
+                          onChange={(e) => { pushUndo(); const v = e.target.value === "full" ? "full" : parseFloat(e.target.value); setShapes((a) => a.map((s) => s.id === sel.id ? { ...s, hgt: v } : s)); }}>
+                          {HEIGHTS.map((h) => <option key={h.value} value={h.value}>{h.label}</option>)}
+                        </select>
+                      </div>
+                      <label style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 11.5 }}>
+                        <input type="checkbox" checked={!!sel.cornice} disabled={!!sel.skirtingOnly}
+                          onChange={(e) => { pushUndo(); const v = e.target.checked; setShapes((a) => a.map((s) => s.id === sel.id ? { ...s, cornice: v } : s)); }} /> Include cornice
+                      </label>
+                      <label style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 11.5 }}>
+                        <input type="checkbox" checked={!!sel.skirting}
+                          onChange={(e) => { pushUndo(); const v = e.target.checked; setShapes((a) => a.map((s) => s.id === sel.id ? { ...s, skirting: v } : s)); }} /> Include skirting
+                      </label>
+                      <label style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 11.5 }}>
+                        <input type="checkbox" checked={!!sel.skirtingOnly}
+                          onChange={(e) => { pushUndo(); const v = e.target.checked; setShapes((a) => a.map((s) => s.id === sel.id ? { ...s, skirtingOnly: v } : s)); }} /> Skirting only
+                      </label>
+                    </>
+                  )}
+                  {sel.cat === "roof_void_decon" && (
+                    <>
+                      <label style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 11.5 }}>
+                        <input type="checkbox" checked={!!sel.insulation}
+                          onChange={(e) => { pushUndo(); const v = e.target.checked; setShapes((a) => a.map((s) => s.id === sel.id ? { ...s, insulation: v } : s)); }} /> Include insulation removal
+                      </label>
+                      {sel.insulation && (
+                        <div style={st.row}>
+                          <span style={st.meta}>Insulation type:</span>
+                          <select style={{ ...st.selectEl, flex: 1 }} value={sel.insulationType || "batts"}
+                            onChange={(e) => { pushUndo(); const v = e.target.value; setShapes((a) => a.map((s) => s.id === sel.id ? { ...s, insulationType: v } : s)); }}>
+                            {INSULATION_TYPES.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}
+                          </select>
+                        </div>
+                      )}
+                    </>
+                  )}
+                  <div style={st.row}>
+                    <select style={{ ...st.selectEl, flex: 1 }} value={sel.room ?? ""}
+                      onChange={(e) => { pushUndo(); const v = e.target.value ? Number(e.target.value) : null; setShapes((a) => a.map((s) => s.id === sel.id ? { ...s, room: v } : s)); }}>
+                      <option value="">Unassigned</option>
+                      {rooms.map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
+                    </select>
+                    <button style={btn(false)} onClick={() => { pushUndo(); setShapes((a) => a.filter((s) => s.id !== sel.id)); setSelId(null); }}>Delete</button>
+                  </div>
+                </div>
+              )}
+            </>
+          )}
+        </div>
+
+        <div style={st.section}>
+          {sectionHead("property", "4 · Property scope")}
+          {!collapsed.property && (
+            <>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 4 }}>
+                {propNumField("ADF units", "adf_units")}
+                {propNumField("× days", "adf_days")}
+                {propNumField("Dehum units", "dehum_units")}
+                {propNumField("× days", "dehum_days")}
+                {propNumField("DBKII days", "dbkii_days")}
+                {propNumField("PRV areas", "prv_areas")}
+                {propNumField("AC ducted decontamination", "ac_ducted_units")}
+                {propNumField("AC split decontamination", "ac_split_units")}
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 3 }}>
+                {propCheckField("Contents packout", "contents_packout")}
+                {propCheckField("Contents inventory", "contents_inventory")}
+                {propCheckField("Skip bin", "skip_bin")}
+                {propCheckField("Asbestos testing", "asbestos_testing")}
+              </div>
+              <div style={st.row}>
+                <span style={st.meta}>Contents storage:</span>
+                <select style={{ ...st.selectEl, flex: 1 }} value={property.contents_storage} onChange={(e) => setProp("contents_storage", e.target.value)}>
+                  {STORAGE_MODES.map((m) => <option key={m.value} value={m.value}>{m.label}</option>)}
+                </select>
+              </div>
+              <div style={st.row}>
+                <span style={st.meta}>Roof void decon:</span>
+                <select style={{ ...st.selectEl, flex: 1 }} value={property.roof_void_mode} onChange={(e) => setProp("roof_void_mode", e.target.value)}>
+                  {ROOF_VOID_MODES.map((m) => <option key={m.value} value={m.value}>{m.label}</option>)}
+                </select>
+              </div>
+            </>
           )}
         </div>
 
         <div style={{ ...st.section, flex: 1, overflow: "auto" }}>
-          <div style={st.h}>4 · Quantities</div>
-          {roomRows().map((r) => r.any || !r.isUnassigned ? (
-            <div key={r.name} style={st.qRoom}>
-              <div style={{ fontWeight: 600, color: r.isUnassigned && r.any ? "#e8b34b" : "#e8e6e1" }}>
-                {r.name}{r.isUnassigned && r.any ? " ⚠" : ""} <span style={st.meta}>CH {r.ch} m</span>
-              </div>
-              {CATS.map((c) => categoryLines(c, r).map((line, i) => (
-                <div key={`${c.id}-${i}`} style={st.qLine}>
-                  <span style={{ ...st.swatch, background: c.color }} />
-                  <span style={{ flex: 1 }}>{line.label}</span>
-                  <span style={st.num}>{line.text}</span>
+          {sectionHead("qty", "5 · Quantities")}
+          {!collapsed.qty && (
+            <>
+              {roomRows().map((r) => r.any || !r.isUnassigned ? (
+                <div key={r.name} style={st.qRoom}>
+                  <div style={{ fontWeight: 600, color: r.isUnassigned && r.any ? "#e8b34b" : "#e8e6e1" }}>
+                    {r.name}{r.isUnassigned && r.any ? " ⚠" : ""} <span style={st.meta}>CH {r.ch} m</span>
+                  </div>
+                  {(r.plumbIso || r.elecIso) && (
+                    <div style={{ ...st.meta, fontSize: 11 }}>
+                      {[r.plumbIso && "Plumbing iso", r.elecIso && "Electrical iso"].filter(Boolean).join(" · ")}
+                    </div>
+                  )}
+                  {CATS.map((c) => categoryLines(c, r).map((line, i) => (
+                    <div key={`${c.id}-${i}`} style={st.qLine}>
+                      <span style={{ ...st.swatch, background: c.color }} />
+                      <span style={{ flex: 1 }}>{line.label}</span>
+                      <span style={st.num}>{line.text}</span>
+                    </div>
+                  )))}
                 </div>
-              )))}
-            </div>
-          ) : null)}
-          {shapes.length === 0 && <div style={st.meta}>Nothing marked up yet.</div>}
+              ) : null)}
+              {anyPropertyEntered && (
+                <div style={st.qRoom}>
+                  <div style={{ fontWeight: 600 }}>Property-wide</div>
+                  {propertyTotals.decon_m2 > 0 && qline(`Roof void / cavity decon (${property.roof_void_mode === "all_surfaces" ? "all surfaces" : "visibly affected"})`, `${fmt(propertyTotals.decon_m2)} m²`, "#795548")}
+                  {propertyTotals.insBatts > 0 && qline("Insulation removal (batts)", `${fmt(propertyTotals.insBatts)} m²`, "#795548")}
+                  {propertyTotals.insBlown > 0 && qline("Insulation removal (blown-in)", `${fmt(propertyTotals.insBlown)} m²`, "#795548")}
+                  {propertyTotals.floorProt > 0 && qline("Floor protection", `${fmt(propertyTotals.floorProt)} m²`, "#9E9E9E")}
+                  {parseFloat(property.adf_units) > 0 && qline("ADF", `${property.adf_units} × ${property.adf_days || 0} days`)}
+                  {parseFloat(property.dehum_units) > 0 && qline("Dehumidifiers", `${property.dehum_units} × ${property.dehum_days || 0} days`)}
+                  {parseFloat(property.dbkii_days) > 0 && qline("DBKII", `${property.dbkii_days} days`)}
+                  {parseFloat(property.prv_areas) > 0 && qline("PRV areas", property.prv_areas)}
+                  {parseFloat(property.ac_ducted_units) > 0 && qline("AC ducted decontamination", property.ac_ducted_units)}
+                  {parseFloat(property.ac_split_units) > 0 && qline("AC split decontamination", property.ac_split_units)}
+                  {property.contents_packout && qline("Contents packout", "✓")}
+                  {property.contents_inventory && qline("Contents inventory", "✓")}
+                  {property.contents_storage !== "none" && qline("Contents storage", property.contents_storage)}
+                  {property.skip_bin && qline("Skip bin", "✓")}
+                  {property.asbestos_testing && qline("Asbestos testing", "✓")}
+                </div>
+              )}
+              {shapes.length === 0 && !anyPropertyEntered && <div style={st.meta}>Nothing marked up yet.</div>}
+            </>
+          )}
         </div>
 
         <div style={st.section}>
@@ -827,6 +1103,7 @@ export default function App() {
             </button>
           </div>
           <div style={st.meta}>Project JSON = markup backup (no image — you re-load the plan on import). Save it as [Job]_markup_PROJECT.json in the Drive job folder at the end of every session — this is the durable, cross-device record. Autosave (IndexedDB) is per-browser/per-device convenience only.</div>
+          <div style={st.meta}>Quantities only — this tool never applies rates or pricing. Any pricing engine consumes the exported JSON.</div>
           <div style={{ ...st.meta, textAlign: "right" }}>{versionStamp}</div>
         </div>
       </div>
@@ -840,7 +1117,7 @@ export default function App() {
           <div ref={innerRef} data-testid="plan-canvas" style={{ position: "absolute", left: pan.x, top: pan.y, width: img.w, height: img.h, transform: `scale(${zoom})`, transformOrigin: "0 0" }}>
             <img src={img.src} width={img.w} height={img.h} draggable={false} style={{ display: "block", userSelect: "none" }} alt="floor plan" />
             <svg width={img.w} height={img.h} viewBox={`0 0 ${img.w} ${img.h}`} style={{ position: "absolute", inset: 0, overflow: "visible" }}>
-              {shapes.map((s) => {
+              {shapes.filter((s) => !hiddenCats.has(s.cat) && !hiddenRooms.has(s.room)).map((s) => {
                 const c = catById(s.cat);
                 const isSel = s.id === selId;
                 return (
@@ -851,7 +1128,8 @@ export default function App() {
                         stroke={c.color} strokeWidth={(isSel ? 2.5 : 1.2) / zoom} />
                     ) : (
                       <line x1={s.x1} y1={s.y1} x2={s.x2} y2={s.y2}
-                        stroke={c.color} strokeWidth={(isSel ? 5 : 3.5) / zoom} strokeLinecap="round" />
+                        stroke={c.color} strokeWidth={(isSel ? 5 : 3.5) / zoom} strokeLinecap="round"
+                        strokeDasharray={s.skirtingOnly ? `${6 / zoom} ${4 / zoom}` : undefined} />
                     )}
                     {scale && (
                       <text x={s.type === "rect" ? s.x + s.w / 2 : (s.x1 + s.x2) / 2}
