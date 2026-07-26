@@ -47,9 +47,40 @@ const DEFAULT_PROPERTY = {
   contents_packout: false, contents_inventory: false, skip_bin: false, asbestos_testing: false,
   contents_storage: "none", roof_void_mode: "all_surfaces",
 };
+// Cabinetry face-height presets (D1.4, Jordan ruling 26 Jul 2026 — perimeter × height).
+// "" = not yet selected (validation flag); "custom" is a UI-only sentinel, never priced itself.
+const CAB_HEIGHTS = [
+  { value: "0.9", label: "Base 0.9 m" },
+  { value: "2.1", label: "Tall 2.1 m" },
+  { value: "2.4", label: "Full 2.4 m" },
+];
 
 const APP_VERSION = "v4.0";
 const BUILD_DATE = typeof __BUILD_DATE__ !== "undefined" ? __BUILD_DATE__ : "";
+
+// ---------- rectangle union area (D1.2 — overlap/abutment netting) ----------
+// Coordinate-compression sweep in raw px space (scale is uniform, so unioning in px then
+// squaring the scale afterward is equivalent and avoids per-rect conversions). Overlapping
+// C2 shapes must never have their overlap counted twice; abutting shapes sum exactly.
+function unionAreaPx(rects) {
+  if (!rects.length) return 0;
+  if (rects.length === 1) return rects[0].w * rects[0].h;
+  const xs = [...new Set(rects.flatMap((r) => [r.x, r.x + r.w]))].sort((a, b) => a - b);
+  const ys = [...new Set(rects.flatMap((r) => [r.y, r.y + r.h]))].sort((a, b) => a - b);
+  let area = 0;
+  for (let i = 0; i < xs.length - 1; i++) {
+    const x0 = xs[i], x1 = xs[i + 1], dx = x1 - x0;
+    if (dx <= 0) continue;
+    const cx = (x0 + x1) / 2;
+    for (let j = 0; j < ys.length - 1; j++) {
+      const y0 = ys[j], y1 = ys[j + 1], dy = y1 - y0;
+      if (dy <= 0) continue;
+      const cy = (y0 + y1) / 2;
+      if (rects.some((r) => cx > r.x && cx < r.x + r.w && cy > r.y && cy < r.y + r.h)) area += dx * dy;
+    }
+  }
+  return area;
+}
 
 export default function App() {
   const [view, setView] = useState("home"); // home | editor
@@ -76,6 +107,8 @@ export default function App() {
   const [wallSkirtingOnly, setWallSkirtingOnly] = useState(false);
   const [roofInsulation, setRoofInsulation] = useState(false);
   const [roofInsulationType, setRoofInsulationType] = useState("batts");
+  const [cabHgt, setCabHgt] = useState("");        // default cabH for NEW cabinetry shapes: "" | "0.9" | "2.1" | "2.4" | "custom"
+  const [cabHgtCustom, setCabHgtCustom] = useState("");
   // shapes
   const [shapes, setShapes] = useState([]);
   const [selId, setSelId] = useState(null);
@@ -281,7 +314,17 @@ export default function App() {
         const h = hitHandle(sel, pt);
         if (h !== null) { pushUndo(); drag.current = { mode: "handle", h, id: sel.id }; return; }
       }
-      const hit = [...shapes].reverse().find((s) => hitShape(s, pt));
+      // Click-to-cycle-underneath: collect every shape under the point, topmost first (z-order
+      // = draw order, so reverse). If the current selection is among them, advance to the next
+      // one down (wrapping back to the top) so a shape hidden underneath another is reachable by
+      // clicking the same spot again. A fresh click (no prior selection at this point) always
+      // grabs the topmost hit, so normal click-drag is unaffected.
+      const hits = [...shapes].reverse().filter((s) => hitShape(s, pt));
+      let hit = null;
+      if (hits.length) {
+        const idx = selId != null ? hits.findIndex((s) => s.id === selId) : -1;
+        hit = idx === -1 ? hits[0] : hits[(idx + 1) % hits.length];
+      }
       if (hit) { setSelId(hit.id); pushUndo(); drag.current = { mode: "move", id: hit.id, sx: pt.x, sy: pt.y, orig: { ...hit } }; }
       else setSelId(null);
       return;
@@ -291,7 +334,8 @@ export default function App() {
       pushUndo();
       const s = cat.kind === "fill"
         ? { id: nid(), type: "rect", cat: cat.id, room: activeRoom, x: pt.x, y: pt.y, w: 0, h: 0,
-            ...(cat.id === "roof_void_decon" ? { insulation: roofInsulation, insulationType: roofInsulationType } : {}) }
+            ...(cat.id === "roof_void_decon" ? { insulation: roofInsulation, insulationType: roofInsulationType } : {}),
+            ...(cat.id === "cabinetry" ? { cabH: cabHgt === "custom" ? cabHgtCustom : cabHgt } : {}) }
         : { id: nid(), type: "line", cat: cat.id, room: activeRoom, x1: pt.x, y1: pt.y, x2: pt.x, y2: pt.y,
             ...(cat.id === "wall_strip" ? { hgt: wallHgt, cornice: wallCornice, skirting: wallSkirting, skirtingOnly: wallSkirtingOnly } : {}) };
       setShapes((a) => [...a, s]);
@@ -449,9 +493,14 @@ export default function App() {
     if (s.cat === "containment") return "containment";
     if (s.cat === "wall_strip" && s.skirtingOnly) return `${fmt(lenOf(s))} m skirting`;
     const q = qtyOf(s);
+    if (s.cat === "cabinetry") {
+      const L = s.w * scale, W = s.h * scale, h = cabHOf(s);
+      if (!h) return `${fmt(L)}×${fmt(W)} m — set height ⚠`;
+      return `${fmt(L)}×${fmt(W)} m, h=${fmt(h, 2)} = ${fmt(q)} m² face`;
+    }
     if (s.type === "rect") {
       const L = s.w * scale, W = s.h * scale;
-      return `${fmt(L)}×${fmt(W)} m = ${fmt(q)} m²`;
+      return s.cat === "condition2" ? `${fmt(L)}×${fmt(W)} m = ${fmt(q)} m² fp` : `${fmt(L)}×${fmt(W)} m = ${fmt(q)} m²`;
     }
     if (s.cat === "wall_strip") {
       const len = lenOf(s), ch = wallEffHeight(s);
@@ -479,41 +528,104 @@ export default function App() {
           row.wallLinm = cs.filter((s) => !s.skirtingOnly).reduce((a, s) => a + (lenOf(s) || 0), 0);
           row.corniceLinm = cs.filter((s) => s.cornice && !s.skirtingOnly).reduce((a, s) => a + (lenOf(s) || 0), 0);
           row.skirtingLinm = cs.filter((s) => s.skirtingOnly || s.skirting).reduce((a, s) => a + (lenOf(s) || 0), 0);
+          // D1.3 — wall-strip working (per-line length × its own height).
+          row.wallWorking = {
+            lines: cs.map((s) => ({ length_m: round2(lenOf(s)), height_m: s.skirtingOnly ? null : round2(wallEffHeight(s)),
+              m2: round2(qtyOf(s) || 0), cornice: !!s.cornice, skirting: !!s.skirting, skirtingOnly: !!s.skirtingOnly })),
+            linm: 0, m2: 0, // filled in after loop once row.wallLinm/counts settle
+            working: cs.length
+              ? cs.map((s) => s.skirtingOnly ? `${round2(lenOf(s))}m skirting-only` : `${round2(lenOf(s))}×${round2(wallEffHeight(s))}`).join(" + ")
+              : "no wall strip drawn",
+          };
           continue;
         }
         row.counts[c.id] = cs.reduce((a, s) => a + (qtyOf(s) || 0), 0);
       }
-      // ---- v4.0 CONDITION 2: combine footprints FIRST, apply the factor ONCE, then NET ----
+      if (row.wallWorking) {
+        row.wallWorking.linm = round2(row.wallLinm);
+        row.wallWorking.m2 = round2(row.counts.wall_strip);
+        row.wallWorking.working += ` = ${round2(row.counts.wall_strip)} m²`;
+      }
+      // ---- v4.0 CONDITION 2: UNION footprints per height-group FIRST, apply the factor ONCE
+      // per group, then NET. A shape's own height override (D1.5 — stairwell/raked/void) puts
+      // it in its own group so it gets its own surface factor instead of averaging into the room.
+      // Overlapping/abutting shapes within a group are netted via unionAreaPx (D1.2) — summing
+      // raw footprints would double-count any overlap.
       const c2s = rs.filter((s) => s.cat === "condition2");
-      // Precision: carry FULL precision through the arithmetic (m2raw) and round only at the
-      // edges. Rounding each shape before summing shifts the room total by ~0.01 m² and would
-      // break the BMLJ00685 acceptance assertion (garage net 46.16).
-      const c2Shapes = c2s.map((s) => {
-        const m2raw = s.w * s.h * scale * scale;
-        return { w: round2(s.w * scale), l: round2(s.h * scale), m2: round2(m2raw), m2raw,
-                 h_override: parseFloat(s.c2H) || null };
+      const c2Shapes = c2s.map((s) => ({
+        s, w: round2(s.w * scale), l: round2(s.h * scale), m2: round2(s.w * s.h * scale * scale),
+        h_override: parseFloat(s.c2H) || null,
+      }));
+      const groups = new Map(); // effective height -> shape entries
+      c2Shapes.forEach((cs2) => {
+        const h = cs2.h_override || row.ch;
+        if (!groups.has(h)) groups.set(h, []);
+        groups.get(h).push(cs2);
       });
-      const c2Footprint = c2Shapes.reduce((a, s) => a + s.m2raw, 0);
-      // A shape may carry its own height override (double-height stairwell / raked / void) — D1.5.
-      const c2Surface = c2Shapes.reduce((a, s) => a + s.m2raw * (2 + (s.h_override || row.ch)), 0);
+      const groupEntries = [...groups.entries()];
+      let c2Footprint = 0, c2Surface = 0, overlapNetted = false;
+      const heightGroups = [];
+      for (const [h, group] of groupEntries) {
+        const rects = group.map((g) => ({ x: g.s.x, y: g.s.y, w: g.s.w, h: g.s.h }));
+        const sumFootprints = group.reduce((a, g) => a + g.m2, 0);
+        const unionM2raw = unionAreaPx(rects) * scale * scale;
+        const gNetted = round2(unionM2raw) < round2(sumFootprints);
+        if (gNetted) overlapNetted = true;
+        c2Footprint += unionM2raw;
+        c2Surface += unionM2raw * (2 + h);
+        heightGroups.push({ height: h, footprint_m2: round2(unionM2raw), surface_m2: round2(unionM2raw * (2 + h)),
+          shape_count: group.length, overlap_netted: gNetted });
+      }
       const c2Deduct = (row.counts.wall_strip || 0) + (row.counts.ceiling_strip || 0) + (row.counts.floor_strip || 0);
       const c2Net = c2Surface - c2Deduct;
+      // D1.3 — the working string must reflect the H actually used per shape. A single group at
+      // the room's own ceiling height keeps the original compact form; any height override (D1.5)
+      // switches to a per-group breakdown so the string stays hand-reproducible (never claim
+      // "×(2+2.4H)" for a shape that was actually costed at a different H).
+      const singleRoomGroup = groupEntries.length === 1 && groupEntries[0][0] === row.ch;
+      let c2Working;
+      if (!c2Shapes.length) {
+        c2Working = "no Condition 2 zone drawn";
+      } else if (singleRoomGroup) {
+        c2Working = `${c2Shapes.map((cs2) => `(${cs2.w}×${cs2.l})`).join("+")}${overlapNetted ? " [overlap netted]" : ""} = ${round2(c2Footprint)} m² fp (union) → ×(2+${row.ch}H) = ${round2(c2Surface)} → −(${round2(c2Deduct)}) = ${round2(c2Net)}`;
+      } else {
+        const parts = groupEntries.map(([h, group]) => {
+          const label = group.length > 1 ? `[${group.map((g) => `(${g.w}×${g.l})`).join("+")}]` : `(${group[0].w}×${group[0].l})`;
+          const gFp = round2(unionAreaPx(group.map((g) => ({ x: g.s.x, y: g.s.y, w: g.s.w, h: g.s.h }))) * scale * scale);
+          return `${label} fp=${gFp} ×(2+${h}H) = ${round2(gFp * (2 + h))}`;
+        });
+        c2Working = `${parts.join(" + ")} → surface Σ = ${round2(c2Surface)} → −(${round2(c2Deduct)}) = ${round2(c2Net)}`;
+      }
       row.c2 = {
-        shapes: c2Shapes.map(({ m2raw, ...rest }) => rest), footprint_m2: round2(c2Footprint),
-        ceiling_height: row.ch, factor: `(2 + ${row.ch}H)`,
+        shapes: c2Shapes.map(({ w, l, m2, h_override }) => ({ w, l, m2, h_override })),
+        footprint_m2: round2(c2Footprint), overlap_netted: overlapNetted,
+        ceiling_height: row.ch, factor: singleRoomGroup ? `(2 + ${row.ch}H)` : "(2 + H) per shape group — see height_groups / working",
+        height_groups: heightGroups,
         surface_m2: round2(c2Surface),
         deductions: { wall_strip: round2(row.counts.wall_strip || 0),
                       ceiling_strip: round2(row.counts.ceiling_strip || 0),
                       floor_strip: round2(row.counts.floor_strip || 0) },
         net_m2: round2(c2Net),
-        working: c2Shapes.length
-          ? `${c2Shapes.map((s) => `(${s.w}×${s.l})`).join("+")} = ${round2(c2Footprint)} m² fp → ×(2+${row.ch}H) = ${round2(c2Surface)} → −(${round2(c2Deduct)}) = ${round2(c2Net)}`
-          : "no Condition 2 zone drawn",
+        working: c2Working,
       };
       row.counts.condition2 = round2(c2Net);   // NET is the priced figure
-      row.cabMissingH = rs.some((s) => s.cat === "cabinetry" && !cabHOf(s));
-      row.cabFootprint = rs.filter((s) => s.cat === "cabinetry")
-        .reduce((a, s) => a + s.w * s.h * scale * scale, 0);
+      // D1.3 — cabinetry working (footprint -> perimeter x height -> face).
+      const cabShapes = rs.filter((s) => s.cat === "cabinetry");
+      row.cabMissingH = cabShapes.some((s) => !cabHOf(s));
+      row.cabFootprint = cabShapes.reduce((a, s) => a + s.w * s.h * scale * scale, 0);
+      row.cabWorking = {
+        shapes: cabShapes.map((s) => {
+          const L = round2(s.w * scale), W = round2(s.h * scale), h = cabHOf(s), perimeter_m = round2(2 * (L + W));
+          return { w: L, l: W, perimeter_m, height_m: h, face_m2: h ? round2(perimeter_m * h) : 0 };
+        }),
+        footprint_m2: round2(row.cabFootprint), face_m2: round2(row.counts.cabinetry),
+        working: cabShapes.length
+          ? cabShapes.map((s) => {
+              const L = round2(s.w * scale), W = round2(s.h * scale), h = cabHOf(s);
+              return h ? `(2×(${L}+${W}))×${h}` : `(${L}×${W}) NO HEIGHT`;
+            }).join(" + ") + ` = ${round2(row.counts.cabinetry)} m² face`
+          : "no cabinetry drawn",
+      };
       return row;
     }).filter(Boolean);
   };
@@ -524,7 +636,16 @@ export default function App() {
     const insBatts = roofShapes.filter((s) => s.insulation && s.insulationType === "batts").reduce((a, s) => a + (qtyOf(s) || 0), 0);
     const insBlown = roofShapes.filter((s) => s.insulation && s.insulationType === "blown_in").reduce((a, s) => a + (qtyOf(s) || 0), 0);
     const floorProt = shapes.filter((s) => s.cat === "floor_protection").reduce((a, s) => a + (qtyOf(s) || 0), 0);
-    return { decon_m2, insBatts, insBlown, floorProt };
+    // D1.3 — roof-void working (shape list + human-readable calculation).
+    const roofWorking = {
+      shapes: roofShapes.map((s) => ({ w: round2(s.w * scale), l: round2(s.h * scale), m2: round2(qtyOf(s) || 0),
+        insulation: !!s.insulation, insulationType: s.insulation ? s.insulationType : null })),
+      decon_m2: round2(decon_m2), insulation_batts_m2: round2(insBatts), insulation_blown_m2: round2(insBlown),
+      working: roofShapes.length
+        ? roofShapes.map((s) => `(${round2(s.w * scale)}×${round2(s.h * scale)})`).join(" + ") + ` = ${round2(decon_m2)} m² decon`
+        : "no roof void zone drawn",
+    };
+    return { decon_m2, insBatts, insBlown, floorProt, roofWorking };
   };
   // Per-category display lines for the quantities panel — floor/ceiling strip each
   // produce two labelled outputs from the same underlying figure (strip + matching decon).
@@ -540,6 +661,23 @@ export default function App() {
       if (row.skirtingLinm) lines.push({ label: "Skirting removal", text: `${fmt(row.skirtingLinm)} lm` });
       return lines;
     }
+    // v4.0 — Condition 2 is NETTED; the headline IS the priced figure. Shown even when
+    // net <= 0 (never silently hidden — D1.6) with a sub-line showing the working.
+    if (c.id === "condition2") {
+      if (!row.c2 || !row.c2.shapes.length) return [];
+      const isBad = row.c2.net_m2 <= 0;
+      const stripTotal = round2(row.c2.deductions.wall_strip + row.c2.deductions.ceiling_strip + row.c2.deductions.floor_strip);
+      return [
+        { label: "Condition 2 clean (NET)", text: `${fmt(row.c2.net_m2)} m²`, danger: isBad },
+        { label: "  surface − strip", text: `${fmt(row.c2.surface_m2)} − ${fmt(stripTotal)}`, sub: true },
+      ];
+    }
+    // v4.0 — cabinetry prices on FACE area; unset height is a hard-error state, shown loudly
+    // rather than as a silent 0.
+    if (c.id === "cabinetry") {
+      if (!row.counts.cabinetry && !row.cabMissingH) return [];
+      return [{ label: "Cabinetry face", text: row.cabMissingH ? "set height ⚠" : `${fmt(row.counts.cabinetry)} m²`, danger: row.cabMissingH }];
+    }
     const v = row.counts[c.id];
     if (!v) return [];
     if (c.id === "floor_strip") return [
@@ -550,8 +688,6 @@ export default function App() {
       { label: "Ceiling lining strip", text: `${fmt(v)} m²` },
       { label: "Ceiling cavity decontamination", text: `${fmt(v)} m²` },
     ];
-    if (c.id === "cabinetry") return [{ label: "Cabinetry strip", text: `${fmt(v)} m²` }];
-    if (c.id === "condition2") return [{ label: "Condition 2 clean (all surfaces)", text: `${fmt(v)} m²` }];
     if (c.id === "contingent") return [{ label: "Contingent (provisional)", text: `${fmt(v)} m²` }];
     return [{ label: c.label, text: `${fmt(v)} m²` }];
   };
@@ -616,8 +752,10 @@ export default function App() {
         condition2: r.c2 || null,
         cabinetry_face_m2: round2(r.counts.cabinetry),
         cabinetry_footprint_m2: round2(r.cabFootprint || 0),   // audit only — never priced
+        cabinetry: r.cabWorking || null,
         contingent_m2: round2(r.counts.contingent),
         wall_strip_linm: round2(r.wallLinm), wall_strip_m2: round2(r.counts.wall_strip),
+        wall_strip: r.wallWorking || null,
         cornice_linm: round2(r.corniceLinm), skirting_linm: round2(r.skirtingLinm),
         containment_count: r.counts.containment,
         plumbing_iso: r.plumbIso, electrical_iso: r.elecIso,
@@ -634,6 +772,7 @@ export default function App() {
         roof_void: {
           decon_m2: round2(pt.decon_m2), decon_mode: property.roof_void_mode,
           insulation_batts_m2: round2(pt.insBatts), insulation_blown_m2: round2(pt.insBlown),
+          shapes: pt.roofWorking.shapes, working: pt.roofWorking.working,
         },
         floor_protection_m2: round2(pt.floorProt),
       },
@@ -1000,12 +1139,32 @@ export default function App() {
                   )}
                 </div>
               )}
+              {activeCat === "cabinetry" && (
+                <div style={st.selBox}>
+                  <div style={st.row}>
+                    <span style={st.meta}>New cabinetry height:</span>
+                    <select style={{ ...st.selectEl, flex: 1 }} value={cabHgt} onChange={(e) => setCabHgt(e.target.value)}>
+                      <option value="">— select height —</option>
+                      {CAB_HEIGHTS.map((h) => <option key={h.value} value={h.value}>{h.label}</option>)}
+                      <option value="custom">Custom…</option>
+                    </select>
+                  </div>
+                  {cabHgt === "custom" && (
+                    <div style={st.row}>
+                      <span style={st.meta}>Height (m):</span>
+                      <input style={{ ...st.input, flex: 1 }} value={cabHgtCustom} onChange={(e) => setCabHgtCustom(e.target.value)} inputMode="decimal" />
+                    </div>
+                  )}
+                  {!cabHgt && <div style={{ ...st.meta, color: "#e8b34b" }}>No height selected — new shapes will need one set before export (face area cannot price a footprint).</div>}
+                </div>
+              )}
               <div style={st.row}>
                 <button style={btn(tool === "select")} onClick={() => setTool("select")}>Select / edit</button>
                 <button style={btn(tool === "pan")} onClick={() => setTool("pan")}>Pan</button>
                 <button style={btn(false)} onClick={showAll}>Show all</button>
               </div>
               <div style={st.meta}>Shift = straight lines · Del = delete selected · Ctrl+Z = undo · scroll = zoom · space-drag = pan</div>
+              <div style={st.meta}>Click again on overlapping shapes (same spot) to select the one underneath — cycles through the stack.</div>
               <div style={st.meta}>Blue C2 = draw the remediation zone (part-room is fine). Total = floor + ceiling + walls of the zone — no automatic netting of stripped areas. Spot cuts: draw the ACTUAL cutout area (incl. your strip-past-contamination allowance) — quantities price what you draw.</div>
               {sel && (
                 <div style={st.selBox}>
@@ -1049,6 +1208,38 @@ export default function App() {
                         </div>
                       )}
                     </>
+                  )}
+                  {sel.cat === "cabinetry" && (() => {
+                    const isPreset = CAB_HEIGHTS.some((h) => h.value === String(sel.cabH));
+                    const selectVal = isPreset ? String(sel.cabH) : (sel.cabH ? "custom" : "");
+                    return (
+                      <>
+                        <div style={st.row}>
+                          <span style={st.meta}>Height:</span>
+                          <select style={{ ...st.selectEl, flex: 1 }} value={selectVal}
+                            onChange={(e) => { pushUndo(); const v = e.target.value; const next = v === "custom" ? "" : v; setShapes((a) => a.map((s) => s.id === sel.id ? { ...s, cabH: next } : s)); }}>
+                            <option value="">— select height —</option>
+                            {CAB_HEIGHTS.map((h) => <option key={h.value} value={h.value}>{h.label}</option>)}
+                            <option value="custom">Custom…</option>
+                          </select>
+                        </div>
+                        {(selectVal === "custom") && (
+                          <div style={st.row}>
+                            <span style={st.meta}>Height (m):</span>
+                            <input style={{ ...st.input, flex: 1 }} value={sel.cabH ?? ""}
+                              onChange={(e) => { pushUndo(); const v = e.target.value; setShapes((a) => a.map((s) => s.id === sel.id ? { ...s, cabH: v } : s)); }} inputMode="decimal" />
+                          </div>
+                        )}
+                        {!sel.cabH && <div style={{ ...st.meta, color: "#e8b34b" }}>No height set — this shape exports as a hard ERROR (face area cannot price a footprint).</div>}
+                      </>
+                    );
+                  })()}
+                  {sel.cat === "condition2" && (
+                    <div style={st.row}>
+                      <span style={st.meta}>Height override (m):</span>
+                      <input style={{ ...st.input, flex: 1 }} placeholder={`Room default (${roomCH(sel.room)})`} value={sel.c2H ?? ""}
+                        onChange={(e) => { pushUndo(); const v = e.target.value; setShapes((a) => a.map((s) => s.id === sel.id ? { ...s, c2H: v } : s)); }} inputMode="decimal" />
+                    </div>
                   )}
                   <div style={st.row}>
                     <select style={{ ...st.selectEl, flex: 1 }} value={sel.room ?? ""}
@@ -1115,8 +1306,8 @@ export default function App() {
                     </div>
                   )}
                   {CATS.map((c) => categoryLines(c, r).map((line, i) => (
-                    <div key={`${c.id}-${i}`} style={st.qLine}>
-                      <span style={{ ...st.swatch, background: c.color }} />
+                    <div key={`${c.id}-${i}`} style={{ ...st.qLine, color: line.danger ? "#e86a6a" : undefined, fontSize: line.sub ? 11 : st.qLine.fontSize, opacity: line.sub ? 0.75 : 1 }}>
+                      <span style={{ ...st.swatch, background: line.danger ? "#e86a6a" : c.color }} />
                       <span style={{ flex: 1 }}>{line.label}</span>
                       <span style={st.num}>{line.text}</span>
                     </div>
