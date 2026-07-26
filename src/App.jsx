@@ -48,7 +48,7 @@ const DEFAULT_PROPERTY = {
   contents_storage: "none", roof_void_mode: "all_surfaces",
 };
 
-const APP_VERSION = "v3.2";
+const APP_VERSION = "v4.0";
 const BUILD_DATE = typeof __BUILD_DATE__ !== "undefined" ? __BUILD_DATE__ : "";
 
 export default function App() {
@@ -417,18 +417,28 @@ export default function App() {
   const roomCH = (roomId) => chOf(rooms.find((r) => r.id === roomId));
   const wallEffHeight = (s) => (s.hgt === "full" || s.hgt == null ? roomCH(s.room) : s.hgt);
   const lenOf = (s) => Math.hypot(s.x2 - s.x1, s.y2 - s.y1) * scale; // raw line length in m
-  // Primary priced quantity per shape. Rects: footprint m² (condition2 = full zone surface,
-  // no netting of stripped areas — v3.1). Wall lines: m² via their own removal height, unless
-  // skirting-only (no wall lining, contributes 0 — skirting lm is tracked separately in roomRows).
+  // v4.0 — cabinetry FACE area. Cabinetry is priced on the VERTICAL FACE it presents, never on
+  // its plan footprint: a 2.4 m full-height unit and a 0.9 m base unit with identical footprints
+  // are not the same job. face = perimeter x height (Jordan ruling, 26 Jul 2026 — supersedes the
+  // footprint/depth-ratio method). Height comes from the shape's own selector (s.cabH), so it is
+  // chosen in the app and computed BEFORE export.
+  const cabHOf = (s) => parseFloat(s.cabH) || null;      // null = not yet selected
+  const cabFaceOf = (s) => {
+    if (!scale) return 0;
+    const h = cabHOf(s); if (!h) return 0;               // unset height -> 0 + a hard validation flag
+    const Lm = s.w * scale, Wm = s.h * scale;
+    return 2 * (Lm + Wm) * h;                            // perimeter x height
+  };
+  // Primary priced quantity per shape. v4.0: condition2 returns its FOOTPRINT only — the surface
+  // factor is applied ONCE per room after all shape footprints are combined (see roomRows).
+  // Computing a surface per shape gave every shape its own perimeter and FABRICATED internal walls
+  // that do not physically exist, inflating decon on every multi-shape room (BMLJ00685 A2).
   const qtyOf = (s) => {
     if (!scale) return null;
     if (s.type === "rect") {
       const area = s.w * s.h * scale * scale;
-      if (s.cat === "condition2") {
-        const Lm = s.w * scale, Wm = s.h * scale, ch = roomCH(s.room);
-        return 2 * area + 2 * (Lm + Wm) * ch; // floor + ceiling + walls of the drawn zone
-      }
-      return area;
+      if (s.cat === "cabinetry") return cabFaceOf(s);     // FACE m², not footprint
+      return area;                                       // condition2 -> footprint (combined later)
     }
     const len = lenOf(s);
     if (s.cat === "wall_strip") return s.skirtingOnly ? 0 : len * wallEffHeight(s);
@@ -473,6 +483,37 @@ export default function App() {
         }
         row.counts[c.id] = cs.reduce((a, s) => a + (qtyOf(s) || 0), 0);
       }
+      // ---- v4.0 CONDITION 2: combine footprints FIRST, apply the factor ONCE, then NET ----
+      const c2s = rs.filter((s) => s.cat === "condition2");
+      // Precision: carry FULL precision through the arithmetic (m2raw) and round only at the
+      // edges. Rounding each shape before summing shifts the room total by ~0.01 m² and would
+      // break the BMLJ00685 acceptance assertion (garage net 46.16).
+      const c2Shapes = c2s.map((s) => {
+        const m2raw = s.w * s.h * scale * scale;
+        return { w: round2(s.w * scale), l: round2(s.h * scale), m2: round2(m2raw), m2raw,
+                 h_override: parseFloat(s.c2H) || null };
+      });
+      const c2Footprint = c2Shapes.reduce((a, s) => a + s.m2raw, 0);
+      // A shape may carry its own height override (double-height stairwell / raked / void) — D1.5.
+      const c2Surface = c2Shapes.reduce((a, s) => a + s.m2raw * (2 + (s.h_override || row.ch)), 0);
+      const c2Deduct = (row.counts.wall_strip || 0) + (row.counts.ceiling_strip || 0) + (row.counts.floor_strip || 0);
+      const c2Net = c2Surface - c2Deduct;
+      row.c2 = {
+        shapes: c2Shapes.map(({ m2raw, ...rest }) => rest), footprint_m2: round2(c2Footprint),
+        ceiling_height: row.ch, factor: `(2 + ${row.ch}H)`,
+        surface_m2: round2(c2Surface),
+        deductions: { wall_strip: round2(row.counts.wall_strip || 0),
+                      ceiling_strip: round2(row.counts.ceiling_strip || 0),
+                      floor_strip: round2(row.counts.floor_strip || 0) },
+        net_m2: round2(c2Net),
+        working: c2Shapes.length
+          ? `${c2Shapes.map((s) => `(${s.w}×${s.l})`).join("+")} = ${round2(c2Footprint)} m² fp → ×(2+${row.ch}H) = ${round2(c2Surface)} → −(${round2(c2Deduct)}) = ${round2(c2Net)}`
+          : "no Condition 2 zone drawn",
+      };
+      row.counts.condition2 = round2(c2Net);   // NET is the priced figure
+      row.cabMissingH = rs.some((s) => s.cat === "cabinetry" && !cabHOf(s));
+      row.cabFootprint = rs.filter((s) => s.cat === "cabinetry")
+        .reduce((a, s) => a + s.w * s.h * scale * scale, 0);
       return row;
     }).filter(Boolean);
   };
@@ -560,14 +601,22 @@ export default function App() {
       source: `bml-floorplan-markup ${APP_VERSION}`,
       pricing: "QUANTITIES ONLY — this tool never applies rates or pricing. Any pricing engine consumes this JSON.",
       calibration: scale ? { scale_m_per_px: scale, reference_px: calPx, reference_m: calPx * scale } : null,
-      markup_convention: "BML v3.2 (bml-floorplan-quantify-quote)",
-      condition2_model: "condition2_m2 = the full computed surface (floor + ceiling + walls) of every drawn C2 zone, with NO netting of stripped/cavity areas — the drawn zone(s) set the remediation-zone extent for that room (can be part of a room). The engine must use this figure directly (affected_zone basis) and must not derive or net Condition 2 itself. 'Full strip' no longer exists as a category — floor_strip and ceiling_strip are drawn as separate overlays.",
+      markup_convention: "BML v4.0 (bml-floorplan-quantify-quote) — CONDITION 2 IS NETTED",
+      condition2_model: "v4.0 — condition2_net_m2 is the PRICED figure and it is ALREADY NETTED. Method: all C2 shape footprints in a room are COMBINED FIRST, then the surface factor is applied ONCE as (Sum footprints) x (2 + ceiling_height); the stripped areas (wall + ceiling + floor) are then DEDUCTED. Computing a surface per shape (v3.1/v3.2) gave every shape its own perimeter and fabricated internal walls that do not exist, inflating decon on every multi-shape room. Netting matters because a stripped surface is already paid for twice (strip rate + cavity remediation) and must not be charged a third time as a Condition 2 clean. condition2_m2 is retained as an ALIAS OF THE NET figure so no consumer can accidentally read the gross; the gross is condition2_surface_m2 (audit only). A per-shape height override (c2H) supports double-height stairwells and raked ceilings. 'Full strip' no longer exists — floor_strip and ceiling_strip are separate overlays.",
       rooms: roomRows().filter((r) => !r.isUnassigned || r.any).map((r) => ({
         name: r.name, ceiling_height: r.ch,
         strip_room: (r.counts.floor_strip > 0 || r.counts.ceiling_strip > 0 || r.counts.wall_strip > 0),
-        full_strip_m2: 0, floor_strip_m2: round2(r.counts.floor_strip),
-        ceiling_strip_m2: round2(r.counts.ceiling_strip), condition2_m2: round2(r.counts.condition2),
-        cabinetry_m2: round2(r.counts.cabinetry), contingent_m2: round2(r.counts.contingent),
+        floor_strip_m2: round2(r.counts.floor_strip),
+        ceiling_strip_m2: round2(r.counts.ceiling_strip),
+        // NETTED figure (authoritative). condition2_m2 is an alias of the NET so that a consumer
+        // reading the old key can never pick up the un-netted gross.
+        condition2_net_m2: round2(r.counts.condition2),
+        condition2_m2: round2(r.counts.condition2),
+        condition2_surface_m2: r.c2 ? r.c2.surface_m2 : 0,
+        condition2: r.c2 || null,
+        cabinetry_face_m2: round2(r.counts.cabinetry),
+        cabinetry_footprint_m2: round2(r.cabFootprint || 0),   // audit only — never priced
+        contingent_m2: round2(r.counts.contingent),
         wall_strip_linm: round2(r.wallLinm), wall_strip_m2: round2(r.counts.wall_strip),
         cornice_linm: round2(r.corniceLinm), skirting_linm: round2(r.skirtingLinm),
         containment_count: r.counts.containment,
@@ -591,6 +640,16 @@ export default function App() {
       flags: [
         ...(shapes.some((s) => s.room == null && !catById(s.cat)?.propertyScope) ? ["UNASSIGNED shapes present — reassign before pricing"] : []),
         ...(!scale ? ["NOT CALIBRATED — quantities invalid"] : []),
+        // ---- v4.0 D1.6 hard-error validations. A quantity that is not physically plausible must
+        // never leave the app silently: every one of these passed every downstream gate before.
+        ...roomRows().filter((r) => r.any && r.c2 && r.c2.shapes.length && r.c2.net_m2 <= 0)
+          .map((r) => `ERROR — ${r.name}: Condition 2 NET is ${r.c2.net_m2} m² (<= 0). Stripped area (${round2((r.counts.wall_strip||0)+(r.counts.ceiling_strip||0)+(r.counts.floor_strip||0))} m²) meets or exceeds the computed C2 surface (${r.c2.surface_m2} m²). This is the double-height / stairwell signature — set a per-shape height override (c2H) or supply a manual C2 total. DO NOT PRICE THIS AS ZERO.`),
+        ...roomRows().filter((r) => r.any && r.c2 && r.c2.shapes.length && r.c2.surface_m2 > 3 * ((r.counts.wall_strip||0)+(r.counts.ceiling_strip||0)+(r.counts.floor_strip||0)) && ((r.counts.wall_strip||0)+(r.counts.ceiling_strip||0)+(r.counts.floor_strip||0)) > 0)
+          .map((r) => `FLAG — ${r.name}: C2 surface ${r.c2.surface_m2} m² exceeds 3x the stripped area — possible whole-room over-read.`),
+        ...roomRows().filter((r) => r.any && r.c2 && r.c2.shapes.length && !r.ch)
+          .map((r) => `ERROR — ${r.name}: Condition 2 zone drawn with NO ceiling height set.`),
+        ...roomRows().filter((r) => r.cabMissingH)
+          .map((r) => `ERROR — ${r.name}: cabinetry drawn with NO height selected. Cabinetry prices on FACE area (perimeter x height) — a footprint cannot be priced.`),
       ],
     };
   };
