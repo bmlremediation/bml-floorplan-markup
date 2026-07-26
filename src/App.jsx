@@ -58,14 +58,40 @@ const CAB_HEIGHTS = [
 const APP_VERSION = "v4.0";
 const BUILD_DATE = typeof __BUILD_DATE__ !== "undefined" ? __BUILD_DATE__ : "";
 
+// ---------- edge snapping (v4.2) ----------
+// Shapes drawn by hand to visually abut are never numerically coincident. Measured on the real
+// BMLJ00685 garage markup: 12.9 mm and 19.3 mm between edges that are plainly the same wall.
+// A strict union therefore treats them as separate islands and KEEPS the internal wall that the
+// union exists to remove. So: cluster near-coincident edge coordinates onto a shared value
+// FIRST, then union. SNAP_PX is in raw plan px; at a typical calibration that is ~25 mm, which
+// is below drawing precision but well above pixel noise.
+const SNAP_PX = 3;
+function snapRects(rects) {
+  const axisMap = (vals) => {
+    const sorted = [...new Set(vals)].sort((a, b) => a - b);
+    const m = new Map();
+    let rep = sorted[0];
+    for (const v of sorted) { if (v - rep > SNAP_PX) rep = v; m.set(v, rep); }
+    return m;
+  };
+  const xm = axisMap(rects.flatMap((r) => [r.x, r.x + r.w]));
+  const ym = axisMap(rects.flatMap((r) => [r.y, r.y + r.h]));
+  return rects.map((r) => {
+    const x0 = xm.get(r.x), x1 = xm.get(r.x + r.w);
+    const y0 = ym.get(r.y), y1 = ym.get(r.y + r.h);
+    return { x: x0, y: y0, w: Math.max(0, x1 - x0), h: Math.max(0, y1 - y0) };
+  });
+}
+
 // ---------- rectangle union PERIMETER (v4.1 — geometry fix) ----------
 // The wall component of a room's surface is perimeter x height, NOT area x height. Summing
 // area*H treated the footprint number as if it were a perimeter, which is only true when
 // L*W == 2*(L+W) (a 4x4 m room). Small rooms were UNDER-read (1x1: -62%), large rooms
 // OVER-read (10x10: +49%). Exact for axis-aligned rects: compress coordinates, mark filled
 // cells, and count the boundary edges between a filled cell and empty space.
-function unionPerimeterPx(rects) {
-  if (!rects.length) return 0;
+function unionPerimeterPx(rawRects) {
+  if (!rawRects.length) return 0;
+  const rects = snapRects(rawRects);
   const xs = [...new Set(rects.flatMap((r) => [r.x, r.x + r.w]))].sort((a, b) => a - b);
   const ys = [...new Set(rects.flatMap((r) => [r.y, r.y + r.h]))].sort((a, b) => a - b);
   const nx = xs.length - 1, ny = ys.length - 1;
@@ -93,7 +119,8 @@ function unionPerimeterPx(rects) {
 // Coordinate-compression sweep in raw px space (scale is uniform, so unioning in px then
 // squaring the scale afterward is equivalent and avoids per-rect conversions). Overlapping
 // C2 shapes must never have their overlap counted twice; abutting shapes sum exactly.
-function unionAreaPx(rects) {
+function unionAreaPx(rawRects) {
+  const rects = snapRects(rawRects);   // v4.2 — same snapped geometry as the perimeter
   if (!rects.length) return 0;
   if (rects.length === 1) return rects[0].w * rects[0].h;
   const xs = [...new Set(rects.flatMap((r) => [r.x, r.x + r.w]))].sort((a, b) => a - b);
@@ -562,6 +589,12 @@ export default function App() {
           row.wallLinm = cs.filter((s) => !s.skirtingOnly).reduce((a, s) => a + (lenOf(s) || 0), 0);
           row.corniceLinm = cs.filter((s) => s.cornice && !s.skirtingOnly).reduce((a, s) => a + (lenOf(s) || 0), 0);
           row.skirtingLinm = cs.filter((s) => s.skirtingOnly || s.skirting).reduce((a, s) => a + (lenOf(s) || 0), 0);
+          // v4.2 PRODUCTIVITY COUNTS (internal review only - never a client-facing figure and
+          // never priced by this app). A long continuous wall strips faster per m2 than several
+          // short sections, and every separate run costs a reposition. Counting the RUNS lets the
+          // working figures show where that time is going.
+          row.wallRuns = cs.filter((s) => !s.skirtingOnly).length;
+          row.wallRunAvgLinm = row.wallRuns ? row.wallLinm / row.wallRuns : 0;
           // D1.3 — wall-strip working (per-line length × its own height).
           row.wallWorking = {
             lines: cs.map((s) => ({ length_m: round2(lenOf(s)), height_m: s.skirtingOnly ? null : round2(wallEffHeight(s)),
@@ -796,6 +829,14 @@ export default function App() {
         wall_strip: r.wallWorking || null,
         cornice_linm: round2(r.corniceLinm), skirting_linm: round2(r.skirtingLinm),
         containment_count: r.counts.containment,
+        // v4.2 - internal productivity signals (QUANTITIES ONLY, never priced here)
+        productivity: {
+          setups: r.any ? 1 : 0,                       // one mobilisation per room entered
+          wall_runs: r.wallRuns || 0,                  // separate strip runs / angle changes
+          wall_run_avg_linm: round2(r.wallRunAvgLinm || 0),
+          c2_shapes: r.c2 ? r.c2.shapes.length : 0,
+          _note: "Set-up = one per room entered. wall_runs = separate drawn strip runs; a 90-degree change of angle is a new run. Short average run length and many set-ups = slower per m2; long continuous runs = faster per m2. For Jordan's internal judgement on the rate/hours only - NOT a client-facing figure and NOT priced by this app.",
+        },
         plumbing_iso: r.plumbIso, electrical_iso: r.elecIso,
       })),
       property: {
