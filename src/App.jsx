@@ -58,6 +58,37 @@ const CAB_HEIGHTS = [
 const APP_VERSION = "v4.0";
 const BUILD_DATE = typeof __BUILD_DATE__ !== "undefined" ? __BUILD_DATE__ : "";
 
+// ---------- rectangle union PERIMETER (v4.1 — geometry fix) ----------
+// The wall component of a room's surface is perimeter x height, NOT area x height. Summing
+// area*H treated the footprint number as if it were a perimeter, which is only true when
+// L*W == 2*(L+W) (a 4x4 m room). Small rooms were UNDER-read (1x1: -62%), large rooms
+// OVER-read (10x10: +49%). Exact for axis-aligned rects: compress coordinates, mark filled
+// cells, and count the boundary edges between a filled cell and empty space.
+function unionPerimeterPx(rects) {
+  if (!rects.length) return 0;
+  const xs = [...new Set(rects.flatMap((r) => [r.x, r.x + r.w]))].sort((a, b) => a - b);
+  const ys = [...new Set(rects.flatMap((r) => [r.y, r.y + r.h]))].sort((a, b) => a - b);
+  const nx = xs.length - 1, ny = ys.length - 1;
+  if (nx <= 0 || ny <= 0) return 0;
+  const filled = (i, j) => {
+    if (i < 0 || j < 0 || i >= nx || j >= ny) return false;
+    const cx = (xs[i] + xs[i + 1]) / 2, cy = (ys[j] + ys[j + 1]) / 2;
+    return rects.some((r) => cx > r.x && cx < r.x + r.w && cy > r.y && cy < r.y + r.h);
+  };
+  let per = 0;
+  for (let i = 0; i < nx; i++) {
+    for (let j = 0; j < ny; j++) {
+      if (!filled(i, j)) continue;
+      const w = xs[i + 1] - xs[i], h = ys[j + 1] - ys[j];
+      if (!filled(i, j - 1)) per += w;   // top edge exposed
+      if (!filled(i, j + 1)) per += w;   // bottom
+      if (!filled(i - 1, j)) per += h;   // left
+      if (!filled(i + 1, j)) per += h;   // right
+    }
+  }
+  return per;
+}
+
 // ---------- rectangle union area (D1.2 — overlap/abutment netting) ----------
 // Coordinate-compression sweep in raw px space (scale is uniform, so unioning in px then
 // squaring the scale afterward is equivalent and avoids per-rect conversions). Overlapping
@@ -471,7 +502,10 @@ export default function App() {
     if (!scale) return 0;
     const h = cabHOf(s); if (!h) return 0;               // unset height -> 0 + a hard validation flag
     const Lm = s.w * scale, Wm = s.h * scale;
-    return 2 * (Lm + Wm) * h;                            // perimeter x height
+    // v4.1 (Jordan ruling 26 Jul): face = vertical wrap + TOP. The top is a real removed/cleaned
+    // surface. Base is excluded (sits on the floor). Shelves, drawers and carcass divisions are
+    // still excluded — this stays a deliberately CONSERVATIVE convention, not a true surface total.
+    return 2 * (Lm + Wm) * h + Lm * Wm;                  // perimeter x height + top
   };
   // Primary priced quantity per shape. v4.0: condition2 returns its FOOTPRINT only — the surface
   // factor is applied ONCE per room after all shape footprints are combined (see roomRows).
@@ -569,12 +603,16 @@ export default function App() {
         const rects = group.map((g) => ({ x: g.s.x, y: g.s.y, w: g.s.w, h: g.s.h }));
         const sumFootprints = group.reduce((a, g) => a + g.m2, 0);
         const unionM2raw = unionAreaPx(rects) * scale * scale;
+        const unionPerimM = unionPerimeterPx(rects) * scale;
         const gNetted = round2(unionM2raw) < round2(sumFootprints);
         if (gNetted) overlapNetted = true;
         c2Footprint += unionM2raw;
-        c2Surface += unionM2raw * (2 + h);
-        heightGroups.push({ height: h, footprint_m2: round2(unionM2raw), surface_m2: round2(unionM2raw * (2 + h)),
-          shape_count: group.length, overlap_netted: gNetted });
+        // v4.1 GEOMETRY: floor + ceiling are AREAS (2 x union area); walls are PERIMETER x height.
+        const gSurface = 2 * unionM2raw + unionPerimM * h;
+        c2Surface += gSurface;
+        heightGroups.push({ height: h, footprint_m2: round2(unionM2raw), perimeter_m: round2(unionPerimM),
+          floor_ceiling_m2: round2(2 * unionM2raw), walls_m2: round2(unionPerimM * h),
+          surface_m2: round2(gSurface), shape_count: group.length, overlap_netted: gNetted });
       }
       const c2Deduct = (row.counts.wall_strip || 0) + (row.counts.ceiling_strip || 0) + (row.counts.floor_strip || 0);
       const c2Net = c2Surface - c2Deduct;
