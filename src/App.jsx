@@ -1138,8 +1138,8 @@ export default function App() {
         // never leave the app silently: every one of these passed every downstream gate before.
         ...roomRows().filter((r) => r.any && r.c2 && r.c2.shapes.length && r.c2.net_m2 <= 0)
           .map((r) => `ERROR — ${r.name}: Condition 2 NET is ${r.c2.net_m2} m² (<= 0). Stripped area (${round2((r.counts.wall_strip||0)+(r.counts.ceiling_strip||0)+(r.counts.floor_strip||0))} m²) meets or exceeds the computed C2 surface (${r.c2.surface_m2} m²). This is the double-height / stairwell signature — set a per-shape height override (c2H) or supply a manual C2 total. DO NOT PRICE THIS AS ZERO.`),
-        ...roomRows().filter((r) => r.any && r.c2 && r.c2.shapes.length && r.c2.surface_m2 > 3 * ((r.counts.wall_strip||0)+(r.counts.ceiling_strip||0)+(r.counts.floor_strip||0)) && ((r.counts.wall_strip||0)+(r.counts.ceiling_strip||0)+(r.counts.floor_strip||0)) > 0)
-          .map((r) => `FLAG — ${r.name}: C2 surface ${r.c2.surface_m2} m² exceeds 3x the stripped area — possible whole-room over-read.`),
+        ...roomRows().filter((r) => r.any && r.c2 && r.c2.shapes.length && r.c2.surface_m2 > 6 * ((r.counts.wall_strip||0)+(r.counts.ceiling_strip||0)+(r.counts.floor_strip||0)) && ((r.counts.wall_strip||0)+(r.counts.ceiling_strip||0)+(r.counts.floor_strip||0)) > 0)
+          .map((r) => `FLAG — ${r.name}: C2 surface ${r.c2.surface_m2} m² exceeds 6x the stripped area — possible whole-room over-read.`),
         ...roomRows().filter((r) => r.any && r.c2 && r.c2.shapes.length && !r.ch)
           .map((r) => `ERROR — ${r.name}: Condition 2 zone drawn with NO ceiling height set.`),
         ...roomRows().filter((r) => r.cabMissingH)
