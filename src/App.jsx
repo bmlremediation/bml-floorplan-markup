@@ -91,7 +91,7 @@ function migrateFloors(d) {
   };
 }
 
-const APP_VERSION = "v4.0";
+const APP_VERSION = "v4.2";
 const BUILD_DATE = typeof __BUILD_DATE__ !== "undefined" ? __BUILD_DATE__ : "";
 
 // ---------- edge snapping (v4.2) ----------
@@ -892,8 +892,8 @@ export default function App() {
       source: `bml-floorplan-markup ${APP_VERSION}`,
       pricing: "QUANTITIES ONLY — this tool never applies rates or pricing. Any pricing engine consumes this JSON.",
       calibration: scale ? { scale_m_per_px: scale, reference_px: calPx, reference_m: calPx * scale } : null,
-      markup_convention: "BML v4.0 (bml-floorplan-quantify-quote) — CONDITION 2 IS NETTED",
-      condition2_model: "v4.0 — condition2_net_m2 is the PRICED figure and it is ALREADY NETTED. Method: all C2 shape footprints in a room are COMBINED FIRST, then the surface factor is applied ONCE as (Sum footprints) x (2 + ceiling_height); the stripped areas (wall + ceiling + floor) are then DEDUCTED. Computing a surface per shape (v3.1/v3.2) gave every shape its own perimeter and fabricated internal walls that do not exist, inflating decon on every multi-shape room. Netting matters because a stripped surface is already paid for twice (strip rate + cavity remediation) and must not be charged a third time as a Condition 2 clean. condition2_m2 is retained as an ALIAS OF THE NET figure so no consumer can accidentally read the gross; the gross is condition2_surface_m2 (audit only). A per-shape height override (c2H) supports double-height stairwells and raked ceilings. 'Full strip' no longer exists — floor_strip and ceiling_strip are separate overlays.",
+      markup_convention: "BML v4.2 (bml-floorplan-quantify-quote) — MULTI-FLOOR-READY; C2 NETTED; PERIMETER GEOMETRY",
+      condition2_model: "v4.2 — condition2_net_m2 is the PRICED figure and it is ALREADY NETTED. SURFACE: all Condition 2 shapes in a room are UNIONED (with near-coincident edges snapped within ~25 mm first, because shapes drawn by hand to abut are never numerically coincident — measured 12.9 mm and 19.3 mm on real markup — and an un-snapped union keeps the internal wall it exists to remove), then surface = 2 x union_area + union_perimeter x ceiling_height. Floor and ceiling are AREAS (2 x union area); walls are PERIMETER x height. The earlier footprint x (2 + H) form is DEAD: it multiplied the floor AREA by the height to get the wall term, which is only correct in a 4 x 4 m room — it under-read small rooms (1x1: -62%) and over-read large ones (10x10: +49%). NET: surface minus (wall_strip + ceiling_strip + floor_strip), because a stripped surface is already paid for twice (strip rate + cavity remediation) and must not be charged a third time as a Condition 2 clean. A per-shape height override (c2H) puts a shape in its own height group for double-height stairwells and raked ceilings. condition2_m2 is an ALIAS OF THE NET so no consumer can accidentally read the gross; the gross is condition2_surface_m2 (audit only). 'Full strip' no longer exists — floor_strip and ceiling_strip are separate overlays.",
       rooms: roomRows().filter((r) => !r.isUnassigned || r.any).map((r) => ({
         name: r.name, ceiling_height: r.ch,
         strip_room: (r.counts.floor_strip > 0 || r.counts.ceiling_strip > 0 || r.counts.wall_strip > 0),
