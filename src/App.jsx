@@ -860,13 +860,18 @@ export default function App() {
       row.cabWorking = {
         shapes: cabShapes.map((s) => {
           const L = round2(s.w * rowScale), W = round2(s.h * rowScale), h = cabHOf(s), perimeter_m = round2(2 * (L + W));
-          return { w: L, l: W, perimeter_m, height_m: h, face_m2: h ? round2(perimeter_m * h) : 0 };
+          // face = vertical wrap + TOP. The top must appear here AND in the working string below:
+          // showing the wrap-only expression beside a total that includes the top makes the working
+          // figures internally inconsistent, and the working figures are the control.
+          const top_m2 = round2(L * W);
+          return { w: L, l: W, perimeter_m, height_m: h, top_m2,
+                   face_m2: h ? round2(perimeter_m * h + L * W) : 0 };
         }),
         footprint_m2: round2(row.cabFootprint), face_m2: round2(row.counts.cabinetry),
         working: cabShapes.length
           ? cabShapes.map((s) => {
               const L = round2(s.w * rowScale), W = round2(s.h * rowScale), h = cabHOf(s);
-              return h ? `(2×(${L}+${W}))×${h}` : `(${L}×${W}) NO HEIGHT`;
+              return h ? `(2×(${L}+${W}))×${h} + (${L}×${W}) top` : `(${L}×${W}) NO HEIGHT`;
             }).join(" + ") + ` = ${round2(row.counts.cabinetry)} m² face`
           : "no cabinetry drawn",
       };
