@@ -48,11 +48,28 @@ export async function putJob(meta) {
   await reqToPromise(store.put(meta));
 }
 
+// v5.0 — a job's plan images are keyed per floor. The FIRST floor keeps the bare jobId key so
+// every pre-v5 job's image is found exactly where it already is (no migration, no orphans);
+// additional floors use `${jobId}::${floorId}`.
+export function imageKeyFor(jobId, floorId, firstFloorId) {
+  return floorId === firstFloorId ? String(jobId) : `${jobId}::${floorId}`;
+}
+
+export async function deleteImageBlob(key) {
+  const store = await tx("images", "readwrite");
+  await reqToPromise(store.delete(key));
+}
+
 export async function deleteJob(id) {
   const jobStore = await tx("jobs", "readwrite");
   await reqToPromise(jobStore.delete(id));
+  // remove the bare-key image AND every per-floor image, so deleting a job leaves nothing behind
   const imgStore = await tx("images", "readwrite");
-  await reqToPromise(imgStore.delete(id));
+  const keys = await reqToPromise(imgStore.getAllKeys());
+  const prefix = `${id}::`;
+  for (const k of keys) {
+    if (k === id || (typeof k === "string" && k.startsWith(prefix))) await reqToPromise(imgStore.delete(k));
+  }
 }
 
 export async function getImageBlob(id) {

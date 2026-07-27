@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, useCallback } from "react";
-import { listJobs, getJob, putJob, deleteJob as dbDeleteJob, getImageBlob, putImageBlob, dataURLToBlob, blobToDataURL } from "./db.js";
+import { listJobs, getJob, putJob, deleteJob as dbDeleteJob, getImageBlob, putImageBlob, deleteImageBlob, imageKeyFor, dataURLToBlob, blobToDataURL } from "./db.js";
 
 // ---------- BML markup convention (v3.2 — mirrors bml-floorplan-quantify-quote) ----------
 // "Full strip" removed (v3.1): floor_strip + ceiling_strip drawn separately instead.
@@ -33,6 +33,7 @@ const INSULATION_TYPES = [
   { value: "blown_in", label: "Blown-in fill" },
 ];
 const ROOF_VOID_MODES = [
+  { value: "none",             label: "None" },
   { value: "all_surfaces",     label: "All surfaces" },
   { value: "visibly_affected", label: "Visibly affected only" },
 ];
@@ -41,12 +42,34 @@ const STORAGE_MODES = [
   { value: "onsite",  label: "Onsite" },
   { value: "offsite", label: "Offsite" },
 ];
+// Void-room types (v5.0). EXPLICITLY SELECTED, never inferred — the engine keys off void_type
+// and never off the room name, because names are free text and vary per job. Help text only:
+// a CEILING void sits between an upper and a lower floor; a ROOF void sits between the top
+// floor and the roof. The app does not decide which a floor needs.
+const VOID_TYPES = [
+  { value: "ceiling_void", label: "Ceiling void", hint: "between an upper and a lower floor" },
+  { value: "roof_void",    label: "Roof void",    hint: "between the top floor and the roof" },
+];
 const DEFAULT_PROPERTY = {
-  adf_units: "", adf_days: "", dehum_units: "", dehum_days: "", dbkii_days: "",
-  ac_ducted_units: "", ac_split_units: "", prv_areas: "",
+  // afd_* = Air Filtration Devices (renamed from adf_* in v5.0; the old key is still read on
+  // load and still WRITTEN to the export as a deprecated alias so the engine keeps working
+  // through the phase-6 sweep).
+  afd_units: "", afd_days: "", dehum_units: "", dehum_days: "", dbkii_days: "",
+  drymatic_units: "", drymatic_days: "", drying_mat_units: "", drying_mat_days: "",
+  air_mover_units: "", air_mover_days: "",
+  ac_ducted_units: "", ac_split_units: "", ac_duct_removal_rooms: "", prv_areas: "",
   contents_packout: false, contents_inventory: false, skip_bin: false, asbestos_testing: false,
   contents_storage: "none", roof_void_mode: "all_surfaces",
 };
+// v4.x records stored adf_units/adf_days. Fold them into the new keys on load/import so no
+// saved job silently loses its air-filtration figures.
+function migrateProperty(p) {
+  const out = { ...DEFAULT_PROPERTY, ...(p || {}) };
+  if (out.afd_units === "" && p?.adf_units != null && p.adf_units !== "") out.afd_units = p.adf_units;
+  if (out.afd_days === "" && p?.adf_days != null && p.adf_days !== "") out.afd_days = p.adf_days;
+  delete out.adf_units; delete out.adf_days;
+  return out;
+}
 // Cabinetry face-height presets (D1.4, Jordan ruling 26 Jul 2026 — perimeter × height).
 // "" = not yet selected (validation flag); "custom" is a UI-only sentinel, never priced itself.
 const CAB_HEIGHTS = [
@@ -280,29 +303,78 @@ export default function App() {
     setBusy(true); loadedRef.current = false;
     const meta = await getJob(id);
     if (!meta) { setBusy(false); alert("Job data missing or corrupted."); return; }
-    let src = null;
-    if (meta.imgW) {
-      const blob = await getImageBlob(id);
-      if (!blob) alert("Floor plan image missing — re-load the image; markup is intact.");
-      else src = await blobToDataURL(blob);
-    }
     // v5.0 — migrate in memory ONLY. The stored record is left exactly as it was until the
     // user actually changes something and autosave fires.
     const mig = migrateFloors(meta);
+    const af = meta.activeFloor && mig.floors.some((f) => f.id === meta.activeFloor) ? meta.activeFloor : mig.floors[0].id;
+    const afRec = mig.floors.find((f) => f.id === af);
+    // only the ACTIVE floor's plan is loaded now; the rest load lazily on floor switch
+    let src = null;
+    if (afRec?.imgW) {
+      const blob = await getImageBlob(imageKeyFor(id, af, FIRST_FLOOR_ID));
+      if (!blob) alert("Floor plan image missing — re-load the image; markup is intact.");
+      else src = await blobToDataURL(blob);
+    }
     setJobId(id); setJobName(meta.name || ""); setRooms(mig.rooms);
-    setActiveRoom(mig.rooms[0]?.id ?? null);
-    setShapes(mig.shapes); setFloors(mig.floors);
-    setActiveFloor(meta.activeFloor && mig.floors.some((f) => f.id === meta.activeFloor) ? meta.activeFloor : mig.floors[0].id);
+    setActiveRoom(mig.rooms.find((r) => r.floorId === af)?.id ?? null);
+    setShapes(mig.shapes); setFloors(mig.floors); setActiveFloor(af);
     setSelId(null); setUndoStack([]);
-    setProperty({ ...DEFAULT_PROPERTY, ...(meta.property || {}) });
+    setProperty(migrateProperty(meta.property));
     setHiddenCats(new Set()); setHiddenRooms(new Set());
     pendingRescale.current = null;
     idRef.current = Math.max(1, ...(meta.shapes || []).map((s) => s.id + 1), ...(meta.rooms || []).map((r) => r.id + 1));
-    if (src && meta.imgW) {
-      setImg({ src, w: meta.imgW, h: meta.imgH });
-      requestAnimationFrame(() => fitView(meta.imgW, meta.imgH));
+    if (src && afRec?.imgW) {
+      setImg({ src, w: afRec.imgW, h: afRec.imgH });
+      requestAnimationFrame(() => fitView(afRec.imgW, afRec.imgH));
     } else setImg(null);
     setSaveState("saved"); setBusy(false); loadedRef.current = true; setView("editor");
+  };
+
+  // ---------- floors (v5.0) ----------
+  // Switching floors swaps only the plan image + viewport. rooms[] and shapes[] are flat and
+  // stay put; everything downstream filters on floorId, so nothing is written back on switch
+  // and there is no stale-buffer to flush.
+  const MAX_FLOORS = 4;
+  const switchFloor = async (fid) => {
+    if (fid === activeFloor) return;
+    const f = floors.find((x) => x.id === fid); if (!f) return;
+    setSelId(null); setMeasure(null); setTool("select");
+    setActiveFloor(fid);
+    setActiveRoom(rooms.find((r) => r.floorId === fid)?.id ?? null);
+    if (!f.imgW) { setImg(null); return; }
+    try {
+      const blob = await getImageBlob(imageKeyFor(jobId, fid, FIRST_FLOOR_ID));
+      if (!blob) { setImg(null); return; }
+      const src = await blobToDataURL(blob);
+      setImg({ src, w: f.imgW, h: f.imgH });
+      requestAnimationFrame(() => fitView(f.imgW, f.imgH));
+    } catch { setImg(null); }
+  };
+  const addFloor = () => {
+    if (floors.length >= MAX_FLOORS) { alert(`Maximum ${MAX_FLOORS} floors per job.`); return; }
+    // NO AUTO-NAMING — the label starts empty and Jordan types it.
+    const fid = `f${Date.now().toString(36)}`;
+    setFloors((a) => [...a, newFloor(fid)]);
+    setActiveFloor(fid); setActiveRoom(null); setSelId(null); setImg(null); setTool("select");
+  };
+  const renameFloor = (fid, name) => patchFloor(fid, { name });
+  const moveFloor = (fid, dir) => setFloors((a) => {
+    const i = a.findIndex((f) => f.id === fid), j = i + dir;
+    if (i < 0 || j < 0 || j >= a.length) return a;
+    const out = [...a]; [out[i], out[j]] = [out[j], out[i]]; return out;
+  });
+  const deleteFloor = async (fid) => {
+    if (floors.length <= 1) { alert("A job must have at least one floor."); return; }
+    const f = floors.find((x) => x.id === fid);
+    const nRooms = rooms.filter((r) => r.floorId === fid).length;
+    const nShapes = shapes.filter((s) => s.floorId === fid).length;
+    if (!window.confirm(`Delete floor "${f?.name || "(unnamed)"}" and its ${nRooms} room(s) and ${nShapes} shape(s)? This cannot be undone.`)) return;
+    const remaining = floors.filter((x) => x.id !== fid);
+    setRooms((a) => a.filter((r) => r.floorId !== fid));
+    setShapes((a) => a.filter((s) => s.floorId !== fid));
+    setFloors(remaining);
+    if (jobId) { try { await deleteImageBlob(imageKeyFor(jobId, fid, FIRST_FLOOR_ID)); } catch {} }
+    if (activeFloor === fid) await switchFloor(remaining[0].id);
   };
 
   const deleteJob = async (id) => {
@@ -353,30 +425,36 @@ export default function App() {
       const im = new Image();
       im.onload = async () => {
         let { src, w, h } = normaliseImage(im, r.result);
+        const fid = activeFloor;                      // the floor this plan is being loaded into
         setImg({ src, w, h });
         setSelId(null);
-        // If a markup-only project was imported, rescale its coordinates to this image
-        const pr = pendingRescale.current;
+        // If a markup-only project was imported, rescale THIS FLOOR's coordinates to this image.
+        // pendingRescale is keyed by floor: each floor is re-paired with its own plan separately
+        // and they are routinely different sizes.
+        const pr = pendingRescale.current?.[fid];
         if (pr && pr.w > 0) {
           const f = w / pr.w;
           const aspectOk = Math.abs(h / w - pr.h / pr.w) < 0.02;
           if (f !== 1) {
-            setShapes((prev) => prev.map((s) => s.type === "rect"
+            setShapes((prev) => prev.map((s) => (s.floorId ?? fid) !== fid ? s : (s.type === "rect"
               ? { ...s, x: s.x * f, y: s.y * f, w: s.w * f, h: s.h * f }
-              : { ...s, x1: s.x1 * f, y1: s.y1 * f, x2: s.x2 * f, y2: s.y2 * f }));
-            setCalLine((c) => c ? { x1: c.x1 * f, y1: c.y1 * f, x2: c.x2 * f, y2: c.y2 * f } : c);
-            setScale((sc) => (sc ? sc / f : sc));
+              : { ...s, x1: s.x1 * f, y1: s.y1 * f, x2: s.x2 * f, y2: s.y2 * f })));
+            patchFloor(fid, (fl) => ({
+              calLine: fl.calLine ? { x1: fl.calLine.x1 * f, y1: fl.calLine.y1 * f, x2: fl.calLine.x2 * f, y2: fl.calLine.y2 * f } : fl.calLine,
+              scale: fl.scale ? fl.scale / f : fl.scale,
+            }));
           }
           if (!aspectOk) alert("Warning: this image's aspect ratio differs from the original plan — markup may be misaligned. Verify against the plan and re-check calibration with Measure before exporting.");
-          pendingRescale.current = null;
+          delete pendingRescale.current[fid];
         }
+        patchFloor(fid, { imgW: w, imgH: h });
         requestAnimationFrame(() => fitView(w, h));
-        // persist image blob
+        // persist image blob under THIS floor's key
         if (storageOk && jobId) {
           setSaveState("saving");
           try {
             const blob = dataURLToBlob(src);
-            await putImageBlob(jobId, blob);
+            await putImageBlob(imageKeyFor(jobId, fid, FIRST_FLOOR_ID), blob);
             await persistMeta(w, h);
           } catch { setSaveState("error"); }
         }
@@ -449,7 +527,7 @@ export default function App() {
       // one down (wrapping back to the top) so a shape hidden underneath another is reachable by
       // clicking the same spot again. A fresh click (no prior selection at this point) always
       // grabs the topmost hit, so normal click-drag is unaffected.
-      const hits = [...shapes].reverse().filter((s) => hitShape(s, pt));
+      const hits = [...shapes].reverse().filter((s) => (s.floorId ?? activeFloor) === activeFloor && hitShape(s, pt));
       let hit = null;
       if (hits.length) {
         const idx = selId != null ? hits.findIndex((s) => s.id === selId) : -1;
@@ -649,7 +727,13 @@ export default function App() {
     return ids.map((rid) => {
       const room = rooms.find((r) => r.id === rid);
       // property-scope shapes (roof void / floor protection) never belong to a per-room row
-      const rs = shapes.filter((s) => (s.room ?? null) === rid && !catById(s.cat)?.propertyScope);
+      // Property-scope shapes (roof void / floor protection) normally never belong to a per-room
+      // row. The ONE exception is roof-void decon drawn inside an explicit VOID ROOM (v5.0): that
+      // is the whole point of void-as-room, so it flows through the ordinary per-room pipeline
+      // instead of being aggregated job-wide with the other floor's void.
+      const isVoid = !!room?.void_type;
+      const rs = shapes.filter((s) => (s.room ?? null) === rid &&
+        (!catById(s.cat)?.propertyScope || (isVoid && s.cat === "roof_void_decon")));
       if (!room && rs.length === 0) return null;
       // Room-level scale: every shape in a room is measured at that ROOM's floor's scale.
       // Per-shape helpers (qtyOf/lenOf) resolve it themselves; the C2 union and the raw
@@ -661,6 +745,8 @@ export default function App() {
         name: room ? room.name : "Unassigned", ch: room ? chOf(room) : 2.4, isUnassigned: !room,
         plumbIso: room ? !!room.plumbIso : false, elecIso: room ? !!room.elecIso : false,
         counts: {}, wallLinm: 0, corniceLinm: 0, skirtingLinm: 0, any: rs.length > 0,
+        floorId: room ? room.floorId : null,
+        voidType: room?.void_type || null,
         // a shape whose own floor disagrees with its room's is a data defect, never averaged
         floorMismatch: !!room && rs.some((s) => (s.floorId ?? room.floorId) !== room.floorId),
       };
@@ -780,15 +866,38 @@ export default function App() {
             }).join(" + ") + ` = ${round2(row.counts.cabinetry)} m² face`
           : "no cabinetry drawn",
       };
+      // v5.0 — a VOID ROOM carries its own decon + insulation rather than feeding the job-wide
+      // bucket. Batts and blown-in are reported separately: different removal rates.
+      if (isVoid) {
+        const vs = rs.filter((s) => s.cat === "roof_void_decon");
+        const dec = vs.reduce((a, s) => a + (qtyOf(s) || 0), 0);
+        const batts = vs.filter((s) => s.insulation && s.insulationType === "batts").reduce((a, s) => a + (qtyOf(s) || 0), 0);
+        const blown = vs.filter((s) => s.insulation && s.insulationType === "blown_in").reduce((a, s) => a + (qtyOf(s) || 0), 0);
+        row.voidWork = {
+          void_type: room.void_type,
+          decon_m2: round2(dec), insulation_batts_m2: round2(batts), insulation_blown_m2: round2(blown),
+          shapes: vs.map((s) => ({ w: round2(s.w * rowScale), l: round2(s.h * rowScale), m2: round2(qtyOf(s) || 0),
+            insulation: !!s.insulation, insulationType: s.insulation ? s.insulationType : null })),
+          working: vs.length
+            ? vs.map((s) => `(${round2(s.w * rowScale)}×${round2(s.h * rowScale)})`).join(" + ") + ` = ${round2(dec)} m² decon`
+            : "no void decon zone drawn",
+        };
+      }
       return row;
     }).filter(Boolean);
   };
   // Global totals for the two property-scope drawn categories (room assignment ignored).
   const computePropertyTotals = () => {
-    const roofShapes = shapes.filter((s) => s.cat === "roof_void_decon");
+    // v5.0 — roof-void shapes that sit inside an explicit VOID ROOM are that room's, not the
+    // job's. Excluding them here is what stops a void being counted twice once phase 5 drops
+    // the property.roof_void path entirely. Shapes NOT in a void room keep the old behaviour,
+    // so a v4.x job that has never been touched exports exactly as it did.
+    const voidRoomIds = new Set(rooms.filter((r) => r.void_type).map((r) => r.id));
+    const roofShapes = shapes.filter((s) => s.cat === "roof_void_decon" && !voidRoomIds.has(s.room));
     const decon_m2 = roofShapes.reduce((a, s) => a + (qtyOf(s) || 0), 0);
     const insBatts = roofShapes.filter((s) => s.insulation && s.insulationType === "batts").reduce((a, s) => a + (qtyOf(s) || 0), 0);
     const insBlown = roofShapes.filter((s) => s.insulation && s.insulationType === "blown_in").reduce((a, s) => a + (qtyOf(s) || 0), 0);
+    // floor protection stays genuinely job-wide and is SUMMED across every floor
     const floorProt = shapes.filter((s) => s.cat === "floor_protection").reduce((a, s) => a + (qtyOf(s) || 0), 0);
     // D1.3 — roof-void working (shape list + human-readable calculation).
     const roofWorking = {
@@ -892,10 +1001,30 @@ export default function App() {
       source: `bml-floorplan-markup ${APP_VERSION}`,
       pricing: "QUANTITIES ONLY — this tool never applies rates or pricing. Any pricing engine consumes this JSON.",
       calibration: scale ? { scale_m_per_px: scale, reference_px: calPx, reference_m: calPx * scale } : null,
+      // v5.0 — every floor's own calibration. Rooms reference a floor by its TYPED label.
+      floors: floors.map((f, i) => ({
+        id: f.id, name: f.name || "", order: i + 1,
+        scale_m_per_px: f.scale ?? null,
+        calibration: f.scale && f.calLine
+          ? { reference_px: Math.hypot(f.calLine.x2 - f.calLine.x1, f.calLine.y2 - f.calLine.y1),
+              reference_m: Math.hypot(f.calLine.x2 - f.calLine.x1, f.calLine.y2 - f.calLine.y1) * f.scale }
+          : null,
+      })),
       markup_convention: "BML v4.2 (bml-floorplan-quantify-quote) — MULTI-FLOOR-READY; C2 NETTED; PERIMETER GEOMETRY",
       condition2_model: "v4.2 — condition2_net_m2 is the PRICED figure and it is ALREADY NETTED. SURFACE: all Condition 2 shapes in a room are UNIONED (with near-coincident edges snapped within ~25 mm first, because shapes drawn by hand to abut are never numerically coincident — measured 12.9 mm and 19.3 mm on real markup — and an un-snapped union keeps the internal wall it exists to remove), then surface = 2 x union_area + union_perimeter x ceiling_height. Floor and ceiling are AREAS (2 x union area); walls are PERIMETER x height. The earlier footprint x (2 + H) form is DEAD: it multiplied the floor AREA by the height to get the wall term, which is only correct in a 4 x 4 m room — it under-read small rooms (1x1: -62%) and over-read large ones (10x10: +49%). NET: surface minus (wall_strip + ceiling_strip + floor_strip), because a stripped surface is already paid for twice (strip rate + cavity remediation) and must not be charged a third time as a Condition 2 clean. A per-shape height override (c2H) puts a shape in its own height group for double-height stairwells and raked ceilings. condition2_m2 is an ALIAS OF THE NET so no consumer can accidentally read the gross; the gross is condition2_surface_m2 (audit only). 'Full strip' no longer exists — floor_strip and ceiling_strip are separate overlays.",
       rooms: roomRows().filter((r) => !r.isUnassigned || r.any).map((r) => ({
         name: r.name, ceiling_height: r.ch,
+        // the floor's TYPED label (never invented by the app); "" if Jordan hasn't labelled it yet
+        floor: r.floorId ? (floors.find((f) => f.id === r.floorId)?.name || "") : null,
+        // v5.0 VOID ROOM. The engine keys off void_type ONLY — never off the room name, which is
+        // free text. An ordinary room is null here; a room merely NAMED "void" is an ordinary room.
+        void_type: r.voidType || null,
+        ...(r.voidWork ? {
+          decon_m2: r.voidWork.decon_m2,
+          insulation_batts_m2: r.voidWork.insulation_batts_m2,
+          insulation_blown_m2: r.voidWork.insulation_blown_m2,
+          void_decon: r.voidWork,
+        } : {}),
         strip_room: (r.counts.floor_strip > 0 || r.counts.ceiling_strip > 0 || r.counts.wall_strip > 0),
         floor_strip_m2: round2(r.counts.floor_strip),
         ceiling_strip_m2: round2(r.counts.ceiling_strip),
@@ -923,31 +1052,58 @@ export default function App() {
         },
         plumbing_iso: r.plumbIso, electrical_iso: r.elecIso,
       })),
+      // Property scope is entered ONCE per job and is therefore already a combined total across
+      // every floor — there is nothing for a downstream consumer to merge or de-duplicate.
       property: {
-        adf_units: parseFloat(property.adf_units) || 0, adf_days: parseFloat(property.adf_days) || 0,
+        // afd_* is the current key (Air Filtration Devices). adf_* is a DEPRECATED ALIAS kept so
+        // the pricing engine keeps working through the phase-6 sweep; drop it once that lands.
+        afd_units: parseFloat(property.afd_units) || 0, afd_days: parseFloat(property.afd_days) || 0,
+        adf_units: parseFloat(property.afd_units) || 0, adf_days: parseFloat(property.afd_days) || 0,
         dehum_units: parseFloat(property.dehum_units) || 0, dehum_days: parseFloat(property.dehum_days) || 0,
         dbkii_days: parseFloat(property.dbkii_days) || 0,
+        drymatic_units: parseFloat(property.drymatic_units) || 0, drymatic_days: parseFloat(property.drymatic_days) || 0,
+        drying_mat_units: parseFloat(property.drying_mat_units) || 0, drying_mat_days: parseFloat(property.drying_mat_days) || 0,
+        air_mover_units: parseFloat(property.air_mover_units) || 0, air_mover_days: parseFloat(property.air_mover_days) || 0,
         ac_ducted_units: parseFloat(property.ac_ducted_units) || 0, ac_split_units: parseFloat(property.ac_split_units) || 0,
+        ac_duct_removal_rooms: parseFloat(property.ac_duct_removal_rooms) || 0,
         prv_areas: parseFloat(property.prv_areas) || 0,
         contents_packout: !!property.contents_packout, contents_inventory: !!property.contents_inventory,
         contents_storage: property.contents_storage,
         skip_bin: !!property.skip_bin, asbestos_testing: !!property.asbestos_testing,
+        // LEGACY PATH (v5.0 transitional). Only roof-void shapes NOT assigned to a void room land
+        // here. Once a job's voids are drawn inside void rooms this is all zeroes and the figures
+        // live on the rooms instead. Phase 5 removes this block; until then nothing is lost and
+        // an untouched v4.x job still exports exactly as it did.
         roof_void: {
           decon_m2: round2(pt.decon_m2), decon_mode: property.roof_void_mode,
           insulation_batts_m2: round2(pt.insBatts), insulation_blown_m2: round2(pt.insBlown),
           shapes: pt.roofWorking.shapes, working: pt.roofWorking.working,
         },
-        floor_protection_m2: round2(pt.floorProt),
+        floor_protection_m2: round2(pt.floorProt),   // SUMMED across every floor
       },
       flags: [
         ...(shapes.some((s) => s.room == null && !catById(s.cat)?.propertyScope) ? ["UNASSIGNED shapes present — reassign before pricing"] : []),
-        ...(!scale ? ["NOT CALIBRATED — quantities invalid"] : []),
+        // Job-wide "nothing is calibrated at all". Per-floor gaps are reported separately below,
+        // so adding an uncalibrated second floor never invalidates a calibrated first one.
+        ...(!floors.some((f) => f.scale) ? ["NOT CALIBRATED — quantities invalid"] : []),
         // v5.0 per-floor guards. Only emit once a job genuinely has more than one floor, so a
         // single-floor v4.x job still exports byte-identically to v4.2.
         ...(floors.length > 1
           ? floors.filter((f) => !f.scale && shapes.some((s) => s.floorId === f.id))
               .map((f) => `ERROR — floor "${f.name || f.id}" has markup but NO CALIBRATION. Its quantities are invalid; calibrate that floor's plan.`)
           : []),
+        // A floor carrying markup but never labelled — rooms would export floor:"" and the quote
+        // could not say which storey they are on. Never auto-named, so it must be flagged.
+        ...(floors.length > 1
+          ? floors.filter((f) => !f.name?.trim() && (rooms.some((r) => r.floorId === f.id) || shapes.some((s) => s.floorId === f.id)))
+              .map(() => `ERROR — a floor has markup but NO LABEL. Type its label (e.g. G / L1 / L2) — the app never names a floor for you.`)
+          : []),
+        // A room NAMED like a void but with no void_type is an ordinary room. Flag it rather than
+        // reinterpret it — inferring scope from a room name is the BMLJ00685 A6 defect class.
+        ...rooms.filter((r) => !r.void_type && /\bvoid\b/i.test(r.name || ""))
+          .map((r) => `FLAG — "${r.name}" is named like a void but has NO void_type, so it prices as an ORDINARY room. If it is a void, delete it and re-add it with + Add void room. The engine never infers a void from a name.`),
+        ...roomRows().filter((r) => r.voidType && r.counts.roof_void_decon > 0 && property.roof_void_mode === "none")
+          .map((r) => `FLAG — void room "${r.name}" has ${round2(r.counts.roof_void_decon)} m² drawn but Roof void decon is set to "None". The area is exported, NOT zeroed — reconcile before pricing.`),
         ...roomRows().filter((r) => r.floorMismatch)
           .map((r) => `ERROR — ${r.name}: contains shapes drawn on a different floor to the room itself. Those shapes' coordinates and scale disagree — reassign them, do not price this room.`),
         // ---- v4.0 D1.6 hard-error validations. A quantity that is not physically plausible must
@@ -1039,16 +1195,16 @@ export default function App() {
       });
       // v5.0 — same in-memory migration as openJob; a v2/v3/v4 project file becomes one floor.
       const mig = migrateFloors({ ...d, shapes });
+      const af = d.activeFloor && mig.floors.some((f) => f.id === d.activeFloor) ? d.activeFloor : mig.floors[0].id;
       setJobId(id); setJobName(d.jobName || ""); setRooms(mig.rooms);
-      setActiveRoom(mig.rooms[0]?.id ?? null);
-      setShapes(mig.shapes); setFloors(mig.floors);
-      setActiveFloor(d.activeFloor && mig.floors.some((f) => f.id === d.activeFloor) ? d.activeFloor : mig.floors[0].id);
+      setActiveRoom(mig.rooms.find((r) => r.floorId === af)?.id ?? null);
+      setShapes(mig.shapes); setFloors(mig.floors); setActiveFloor(af);
       setSelId(null); setUndoStack([]);
-      setProperty({ ...DEFAULT_PROPERTY, ...(d.property || {}) });
+      setProperty(migrateProperty(d.property));
       setHiddenCats(new Set()); setHiddenRooms(new Set());
       idRef.current = Math.max(1, ...shapes.map((s) => s.id + 1), ...(d.rooms || []).map((x) => x.id + 1));
       if (d.img?.src) {
-        // legacy v2.1 project files with embedded image
+        // legacy v2.1 project files with embedded image (always single-floor)
         setImg(d.img);
         pendingRescale.current = null;
         requestAnimationFrame(() => fitView(d.img.w, d.img.h));
@@ -1056,13 +1212,17 @@ export default function App() {
           (async () => {
             try {
               const blob = dataURLToBlob(d.img.src);
-              await putImageBlob(id, blob);
+              await putImageBlob(imageKeyFor(id, af, FIRST_FLOOR_ID), blob);
             } catch {}
           })();
         }
       } else {
         setImg(null);
-        pendingRescale.current = d.imgW ? { w: d.imgW, h: d.imgH } : null;
+        // Each floor is re-paired with its OWN plan and auto-rescaled against the size it was
+        // marked up at, so the pending sizes are keyed by floor rather than one job-wide pair.
+        const pend = {};
+        for (const f of mig.floors) if (f.imgW) pend[f.id] = { w: f.imgW, h: f.imgH };
+        pendingRescale.current = Object.keys(pend).length ? pend : null;
       }
       loadedRef.current = true;
       setImportOpen(false); setImportText("");
@@ -1086,8 +1246,18 @@ export default function App() {
   const [newRoom, setNewRoom] = useState("");
   const addRoom = () => {
     const n = newRoom.trim(); if (!n) return;
-    const r = { id: nid(), name: n, ch: "2.4", plumbIso: false, elecIso: false, floorId: activeFloor };
+    const r = { id: nid(), name: n, ch: "2.4", plumbIso: false, elecIso: false, floorId: activeFloor, void_type: null };
     setRooms((a) => [...a, r]); setActiveRoom(r.id); setNewRoom("");
+  };
+  // v5.0 void room — created MANUALLY on the active floor with an EXPLICITLY chosen type and a
+  // typed name. Nothing here is inferred: the engine keys off void_type, never off the name.
+  const [newVoidType, setNewVoidType] = useState("");
+  const addVoidRoom = () => {
+    const n = newRoom.trim();
+    if (!newVoidType) { alert("Choose Ceiling void or Roof void first — the type is never assumed."); return; }
+    if (!n) { alert("Type a name for the void room first."); return; }
+    const r = { id: nid(), name: n, ch: "2.4", plumbIso: false, elecIso: false, floorId: activeFloor, void_type: newVoidType };
+    setRooms((a) => [...a, r]); setActiveRoom(r.id); setNewRoom(""); setNewVoidType("");
   };
 
   const sel = shapes.find((s) => s.id === selId);
@@ -1175,8 +1345,10 @@ export default function App() {
 
   const propertyTotals = computePropertyTotals();
   const anyPropertyEntered = propertyTotals.decon_m2 > 0 || propertyTotals.insBatts > 0 || propertyTotals.insBlown > 0 ||
-    propertyTotals.floorProt > 0 || parseFloat(property.adf_units) > 0 || parseFloat(property.dehum_units) > 0 ||
+    propertyTotals.floorProt > 0 || parseFloat(property.afd_units) > 0 || parseFloat(property.dehum_units) > 0 ||
+    parseFloat(property.drymatic_units) > 0 || parseFloat(property.drying_mat_units) > 0 || parseFloat(property.air_mover_units) > 0 ||
     parseFloat(property.dbkii_days) > 0 || parseFloat(property.ac_ducted_units) > 0 || parseFloat(property.ac_split_units) > 0 ||
+    parseFloat(property.ac_duct_removal_rooms) > 0 ||
     parseFloat(property.prv_areas) > 0 || property.contents_packout || property.contents_inventory ||
     property.skip_bin || property.asbestos_testing || property.contents_storage !== "none";
 
@@ -1191,6 +1363,40 @@ export default function App() {
         {!storageOk && <div style={st.warn}>No persistence in this browser — export project JSON before closing.</div>}
 
         <input style={st.input} placeholder="Job — e.g. BMLJ00652 — 12 Sample St" value={jobName} onChange={(e) => setJobName(e.target.value)} />
+
+        {/* ---------- floors strip (v5.0) ---------- */}
+        <div style={st.section}>
+          <div style={{ ...st.h, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <span>FLOORS</span>
+            <button style={{ ...btn(false), padding: "2px 6px", fontSize: 11 }} onClick={addFloor}
+              disabled={floors.length >= MAX_FLOORS} title={`Up to ${MAX_FLOORS} floors per job`}>+ Add floor</button>
+          </div>
+          {floors.map((f, i) => {
+            const active = f.id === activeFloor;
+            const nR = rooms.filter((r) => r.floorId === f.id).length;
+            const nS = shapes.filter((s) => s.floorId === f.id).length;
+            return (
+              <div key={f.id} style={{ ...st.roomRow, outline: active ? "1px solid #6ea8fe" : "none", cursor: "pointer" }}
+                onClick={() => switchFloor(f.id)}>
+                <input value={f.name} onClick={(e) => e.stopPropagation()}
+                  placeholder="label… (e.g. G / L1 / L2)"
+                  onChange={(e) => renameFloor(f.id, e.target.value)}
+                  style={{ flex: 1, minWidth: 0, background: "transparent", border: "none", borderBottom: "1px dashed #3a3f49", color: "#e8e6e1", fontSize: 13, padding: "2px 0" }} />
+                <span style={{ ...st.meta, fontSize: 10 }} title="rooms · shapes on this floor">{nR}r·{nS}s</span>
+                {!f.scale && (nR > 0 || nS > 0) && <span title="This floor is not calibrated — its quantities are invalid" style={{ color: "#e8b34b", fontSize: 11 }}>⚠</span>}
+                <span title="Move up" style={{ cursor: "pointer", opacity: i === 0 ? 0.25 : 0.7 }}
+                  onClick={(e) => { e.stopPropagation(); moveFloor(f.id, -1); }}>▲</span>
+                <span title="Move down" style={{ cursor: "pointer", opacity: i === floors.length - 1 ? 0.25 : 0.7 }}
+                  onClick={(e) => { e.stopPropagation(); moveFloor(f.id, 1); }}>▼</span>
+                <span title="Delete this floor" style={{ cursor: "pointer", opacity: 0.7 }}
+                  onClick={(e) => { e.stopPropagation(); deleteFloor(f.id); }}>✕</span>
+              </div>
+            );
+          })}
+          <div style={{ ...st.meta, fontSize: 10.5 }}>
+            Each floor has its OWN plan image and calibration. Labels are yours — the app never names a floor.
+          </div>
+        </div>
 
         {!img && (
           <label style={st.drop}
@@ -1238,12 +1444,30 @@ export default function App() {
                   onChange={(e) => setNewRoom(e.target.value)} onKeyDown={(e) => e.key === "Enter" && addRoom()} />
                 <button style={btn(false)} onClick={addRoom}>Add</button>
               </div>
-              {rooms.map((r) => (
+              {/* v5.0 void room — type is chosen EXPLICITLY, name is typed. Nothing inferred. */}
+              <div style={st.row}>
+                <select style={{ ...st.selectEl, flex: 1 }} value={newVoidType} onChange={(e) => setNewVoidType(e.target.value)}>
+                  <option value="">— void type —</option>
+                  {VOID_TYPES.map((v) => <option key={v.value} value={v.value}>{v.label}</option>)}
+                </select>
+                <button style={btn(false)} onClick={addVoidRoom} title="Creates a void room on this floor using the name typed above">+ Add void room</button>
+              </div>
+              <div style={{ ...st.meta, fontSize: 10.5 }}>
+                Ceiling void = between an upper and a lower floor · Roof void = between the top floor and the roof.
+                Type the name above, pick the type, then Add.
+              </div>
+              {rooms.filter((r) => (r.floorId ?? activeFloor) === activeFloor).map((r) => (
                 <div key={r.id} style={{ ...st.roomRow, outline: activeRoom === r.id ? "1px solid #6ea8fe" : "none", opacity: hiddenRooms.has(r.id) ? 0.55 : 1 }}
                   onClick={() => setActiveRoom(r.id)}>
                   <input value={r.name} onClick={(e) => e.stopPropagation()}
                     onChange={(e) => setRooms((a) => a.map((x) => x.id === r.id ? { ...x, name: e.target.value } : x))}
                     style={{ flex: 1, minWidth: 0, background: "transparent", border: "none", borderBottom: "1px dashed #3a3f49", color: "#e8e6e1", fontSize: 13, padding: "2px 0" }} />
+                  {r.void_type && (
+                    <span title={`Exported as void_type "${r.void_type}" — the engine keys off this, not the name`}
+                      style={{ fontSize: 9.5, padding: "1px 4px", borderRadius: 3, background: "#795548", color: "#fff", whiteSpace: "nowrap" }}>
+                      {r.void_type === "roof_void" ? "ROOF VOID" : "CEILING VOID"}
+                    </span>
+                  )}
                   <span style={st.meta}>CH</span>
                   <input style={st.chInput} value={r.ch}
                     onClick={(e) => e.stopPropagation()}
@@ -1440,15 +1664,23 @@ export default function App() {
           {sectionHead("property", "4 · Property scope")}
           {!collapsed.property && (
             <>
+              <div style={{ ...st.meta, fontSize: 10.5, marginTop: 2 }}>Drying / equipment — entered ONCE for the whole job (all floors combined).</div>
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 4 }}>
-                {propNumField("ADF units", "adf_units")}
-                {propNumField("× days", "adf_days")}
+                {propNumField("AFD units", "afd_units")}
+                {propNumField("× days", "afd_days")}
                 {propNumField("Dehum units", "dehum_units")}
                 {propNumField("× days", "dehum_days")}
+                {propNumField("Drymatic boost units", "drymatic_units")}
+                {propNumField("× days", "drymatic_days")}
+                {propNumField("Drying mat units", "drying_mat_units")}
+                {propNumField("× days", "drying_mat_days")}
+                {propNumField("Air mover units", "air_mover_units")}
+                {propNumField("× days", "air_mover_days")}
                 {propNumField("DBKII days", "dbkii_days")}
                 {propNumField("PRV areas", "prv_areas")}
                 {propNumField("AC ducted decontamination", "ac_ducted_units")}
                 {propNumField("AC split decontamination", "ac_split_units")}
+                {propNumField("AC duct removal rooms", "ac_duct_removal_rooms")}
               </div>
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 3 }}>
                 {propCheckField("Contents packout", "contents_packout")}
@@ -1476,25 +1708,55 @@ export default function App() {
           {sectionHead("qty", "5 · Quantities")}
           {!collapsed.qty && (
             <>
-              {roomRows().map((r) => r.any || !r.isUnassigned ? (
-                <div key={r.name} style={st.qRoom}>
-                  <div style={{ fontWeight: 600, color: r.isUnassigned && r.any ? "#e8b34b" : "#e8e6e1" }}>
-                    {r.name}{r.isUnassigned && r.any ? " ⚠" : ""} <span style={st.meta}>CH {r.ch} m</span>
+              {(() => {
+                // Quantities span the WHOLE job (every floor), grouped under each floor's typed
+                // label — that is what the quote is built from. Room names repeat across floors,
+                // so the React key has to include the floor.
+                const rows = roomRows().filter((r) => r.any || !r.isUnassigned);
+                const renderRow = (r) => (
+                  <div key={`${r.floorId || "none"}-${r.name}`} style={st.qRoom}>
+                    <div style={{ fontWeight: 600, color: r.isUnassigned && r.any ? "#e8b34b" : "#e8e6e1" }}>
+                      {r.name}{r.isUnassigned && r.any ? " ⚠" : ""}
+                      {r.voidType && (
+                        <span style={{ marginLeft: 4, fontSize: 9.5, padding: "1px 4px", borderRadius: 3, background: "#795548", color: "#fff" }}>
+                          {r.voidType === "roof_void" ? "ROOF VOID" : "CEILING VOID"}
+                        </span>
+                      )}
+                      <span style={st.meta}> CH {r.ch} m</span>
+                    </div>
+                    {(r.plumbIso || r.elecIso) && (
+                      <div style={{ ...st.meta, fontSize: 11 }}>
+                        {[r.plumbIso && "Plumbing iso", r.elecIso && "Electrical iso"].filter(Boolean).join(" · ")}
+                      </div>
+                    )}
+                    {CATS.map((c) => categoryLines(c, r).map((line, i) => (
+                      <div key={`${c.id}-${i}`} style={{ ...st.qLine, color: line.danger ? "#e86a6a" : undefined, fontSize: line.sub ? 11 : st.qLine.fontSize, opacity: line.sub ? 0.75 : 1 }}>
+                        <span style={{ ...st.swatch, background: line.danger ? "#e86a6a" : c.color }} />
+                        <span style={{ flex: 1 }}>{line.label}</span>
+                        <span style={st.num}>{line.text}</span>
+                      </div>
+                    )))}
                   </div>
-                  {(r.plumbIso || r.elecIso) && (
-                    <div style={{ ...st.meta, fontSize: 11 }}>
-                      {[r.plumbIso && "Plumbing iso", r.elecIso && "Electrical iso"].filter(Boolean).join(" · ")}
+                );
+                if (floors.length <= 1) return rows.map(renderRow);
+                const out = [];
+                for (const f of floors) {
+                  const fr = rows.filter((r) => r.floorId === f.id);
+                  if (!fr.length) continue;
+                  out.push(
+                    <div key={`fh-${f.id}`} style={{ ...st.h, marginTop: 6, color: f.name?.trim() ? "#8b909a" : "#e8b34b" }}>
+                      {f.name?.trim() || "(UNLABELLED FLOOR ⚠)"}
                     </div>
-                  )}
-                  {CATS.map((c) => categoryLines(c, r).map((line, i) => (
-                    <div key={`${c.id}-${i}`} style={{ ...st.qLine, color: line.danger ? "#e86a6a" : undefined, fontSize: line.sub ? 11 : st.qLine.fontSize, opacity: line.sub ? 0.75 : 1 }}>
-                      <span style={{ ...st.swatch, background: line.danger ? "#e86a6a" : c.color }} />
-                      <span style={{ flex: 1 }}>{line.label}</span>
-                      <span style={st.num}>{line.text}</span>
-                    </div>
-                  )))}
-                </div>
-              ) : null)}
+                  );
+                  out.push(...fr.map(renderRow));
+                }
+                const orphans = rows.filter((r) => !r.floorId);
+                if (orphans.length) {
+                  out.push(<div key="fh-none" style={{ ...st.h, marginTop: 6, color: "#e8b34b" }}>UNASSIGNED</div>);
+                  out.push(...orphans.map(renderRow));
+                }
+                return out;
+              })()}
               {anyPropertyEntered && (
                 <div style={st.qRoom}>
                   <div style={{ fontWeight: 600 }}>Property-wide</div>
@@ -1502,12 +1764,16 @@ export default function App() {
                   {propertyTotals.insBatts > 0 && qline("Insulation removal (batts)", `${fmt(propertyTotals.insBatts)} m²`, "#795548")}
                   {propertyTotals.insBlown > 0 && qline("Insulation removal (blown-in)", `${fmt(propertyTotals.insBlown)} m²`, "#795548")}
                   {propertyTotals.floorProt > 0 && qline("Floor protection", `${fmt(propertyTotals.floorProt)} m²`, "#9E9E9E")}
-                  {parseFloat(property.adf_units) > 0 && qline("ADF", `${property.adf_units} × ${property.adf_days || 0} days`)}
+                  {parseFloat(property.afd_units) > 0 && qline("AFD (air filtration devices)", `${property.afd_units} × ${property.afd_days || 0} days`)}
                   {parseFloat(property.dehum_units) > 0 && qline("Dehumidifiers", `${property.dehum_units} × ${property.dehum_days || 0} days`)}
+                  {parseFloat(property.drymatic_units) > 0 && qline("Drymatic boost", `${property.drymatic_units} × ${property.drymatic_days || 0} days`)}
+                  {parseFloat(property.drying_mat_units) > 0 && qline("Drying mats", `${property.drying_mat_units} × ${property.drying_mat_days || 0} days`)}
+                  {parseFloat(property.air_mover_units) > 0 && qline("Air movers", `${property.air_mover_units} × ${property.air_mover_days || 0} days`)}
                   {parseFloat(property.dbkii_days) > 0 && qline("DBKII", `${property.dbkii_days} days`)}
                   {parseFloat(property.prv_areas) > 0 && qline("PRV areas", property.prv_areas)}
                   {parseFloat(property.ac_ducted_units) > 0 && qline("AC ducted decontamination", property.ac_ducted_units)}
                   {parseFloat(property.ac_split_units) > 0 && qline("AC split decontamination", property.ac_split_units)}
+                  {parseFloat(property.ac_duct_removal_rooms) > 0 && qline("AC duct removal (rooms)", property.ac_duct_removal_rooms)}
                   {property.contents_packout && qline("Contents packout", "✓")}
                   {property.contents_inventory && qline("Contents inventory", "✓")}
                   {property.contents_storage !== "none" && qline("Contents storage", property.contents_storage)}
@@ -1522,7 +1788,7 @@ export default function App() {
 
         <div style={st.section}>
           <button style={{ ...btn(false), background: "#2f6df6", borderColor: "#2f6df6", color: "#fff" }}
-            onClick={exportQuantities} disabled={!scale || !shapes.length}>
+            onClick={exportQuantities} disabled={!floors.some((f) => f.scale) || !shapes.length}>
             Download quantities JSON
           </button>
           <div style={st.row}>
@@ -1548,7 +1814,8 @@ export default function App() {
           <div ref={innerRef} data-testid="plan-canvas" style={{ position: "absolute", left: pan.x, top: pan.y, width: img.w, height: img.h, transform: `scale(${zoom})`, transformOrigin: "0 0" }}>
             <img src={img.src} width={img.w} height={img.h} draggable={false} style={{ display: "block", userSelect: "none" }} alt="floor plan" />
             <svg width={img.w} height={img.h} viewBox={`0 0 ${img.w} ${img.h}`} style={{ position: "absolute", inset: 0, overflow: "visible" }}>
-              {shapes.filter((s) => !hiddenCats.has(s.cat) && !hiddenRooms.has(s.room)).map((s) => {
+              {/* only the ACTIVE floor's shapes — coordinates are in that floor's plan pixel space */}
+              {shapes.filter((s) => (s.floorId ?? activeFloor) === activeFloor && !hiddenCats.has(s.cat) && !hiddenRooms.has(s.room)).map((s) => {
                 const c = catById(s.cat);
                 const isSel = s.id === selId;
                 return (
