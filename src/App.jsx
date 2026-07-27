@@ -14,6 +14,10 @@ const CATS = [
   { id: "contingent",    label: "Contingent (provisional)",                                          kind: "fill", color: "#FF9900" },
   { id: "wall_strip",    label: "Wall strip",                                                        kind: "line", color: "#EE0000" },
   { id: "containment",   label: "Containment set-up",                                                kind: "line", color: "#4EA72E" },
+  // v5.0 — roof-void decon is ROOM-scoped when drawn inside an explicit void room (that is what
+  // void-as-room means). propertyScope is retained as the FALLBACK for shapes not yet inside one:
+  // it keeps them out of an ordinary room's scope (where they would silently become that room's
+  // quantity) and routes them to the legacy export block plus a hard migration ERROR instead.
   { id: "roof_void_decon", label: "Roof void / ceiling cavity decontamination", kind: "fill", color: "#795548", propertyScope: true },
   { id: "floor_protection", label: "Floor protection",                          kind: "fill", color: "#9E9E9E", propertyScope: true },
 ];
@@ -114,7 +118,7 @@ function migrateFloors(d) {
   };
 }
 
-const APP_VERSION = "v4.2";
+const APP_VERSION = "v5.0";
 const BUILD_DATE = typeof __BUILD_DATE__ !== "undefined" ? __BUILD_DATE__ : "";
 
 // ---------- edge snapping (v4.2) ----------
@@ -1010,8 +1014,13 @@ export default function App() {
               reference_m: Math.hypot(f.calLine.x2 - f.calLine.x1, f.calLine.y2 - f.calLine.y1) * f.scale }
           : null,
       })),
-      markup_convention: "BML v4.2 (bml-floorplan-quantify-quote) — MULTI-FLOOR-READY; C2 NETTED; PERIMETER GEOMETRY",
-      condition2_model: "v4.2 — condition2_net_m2 is the PRICED figure and it is ALREADY NETTED. SURFACE: all Condition 2 shapes in a room are UNIONED (with near-coincident edges snapped within ~25 mm first, because shapes drawn by hand to abut are never numerically coincident — measured 12.9 mm and 19.3 mm on real markup — and an un-snapped union keeps the internal wall it exists to remove), then surface = 2 x union_area + union_perimeter x ceiling_height. Floor and ceiling are AREAS (2 x union area); walls are PERIMETER x height. The earlier footprint x (2 + H) form is DEAD: it multiplied the floor AREA by the height to get the wall term, which is only correct in a 4 x 4 m room — it under-read small rooms (1x1: -62%) and over-read large ones (10x10: +49%). NET: surface minus (wall_strip + ceiling_strip + floor_strip), because a stripped surface is already paid for twice (strip rate + cavity remediation) and must not be charged a third time as a Condition 2 clean. A per-shape height override (c2H) puts a shape in its own height group for double-height stairwells and raked ceilings. condition2_m2 is an ALIAS OF THE NET so no consumer can accidentally read the gross; the gross is condition2_surface_m2 (audit only). 'Full strip' no longer exists — floor_strip and ceiling_strip are separate overlays.",
+      // VERSION HANDSHAKE. The engine asserts on this exact string and must REJECT a convention
+      // it does not recognise rather than infer one. String taken verbatim from
+      // BML_Markup_App_v5_0_MULTIFLOOR_PLAN.md §5 — note it drops the
+      // "(bml-floorplan-quantify-quote)" qualifier that v4.x carried.
+      markup_convention: "BML v5.0 — MULTI-FLOOR; C2 NETTED",
+      multifloor_model: "v5.0 — a job has FLOORS. floors[] carries each floor's own calibration; every room carries `floor` (the floor's TYPED label, never invented by the app — it may be \"\" if unlabelled) and `void_type`. PROPERTY SCOPE IS ENTERED ONCE PER JOB and is therefore already a combined total across every floor, including floor_protection_m2 — there is nothing to merge or de-duplicate, and a consumer must NOT attempt to. VOID ROOMS: void_type is `ceiling_void` (between an upper and a lower floor) or `roof_void` (between the top floor and the roof), and is ALWAYS an explicit human selection. Key off void_type ONLY — NEVER off the room name, which is free text: a room named \"understair void\" with void_type null is an ORDINARY room and is flagged, not reinterpreted. A void room carries decon_m2 + insulation_batts_m2 + insulation_blown_m2 + void_decon{} and is otherwise an ordinary room (own ceiling height, containment, strip). property.roof_void is GONE unless a legacy job still has roof-void shapes outside a void room, in which case it is present AND a hard ERROR flag is raised — never silently dropped.",
+      condition2_model: "v5.0 — condition2_net_m2 is the PRICED figure and it is ALREADY NETTED. SURFACE: all Condition 2 shapes in a room are UNIONED (with near-coincident edges snapped within ~25 mm first, because shapes drawn by hand to abut are never numerically coincident — measured 12.9 mm and 19.3 mm on real markup — and an un-snapped union keeps the internal wall it exists to remove), then surface = 2 x union_area + union_perimeter x ceiling_height. Floor and ceiling are AREAS (2 x union area); walls are PERIMETER x height. The earlier footprint x (2 + H) form is DEAD: it multiplied the floor AREA by the height to get the wall term, which is only correct in a 4 x 4 m room — it under-read small rooms (1x1: -62%) and over-read large ones (10x10: +49%). NET: surface minus (wall_strip + ceiling_strip + floor_strip), because a stripped surface is already paid for twice (strip rate + cavity remediation) and must not be charged a third time as a Condition 2 clean. A per-shape height override (c2H) puts a shape in its own height group for double-height stairwells and raked ceilings. condition2_m2 is an ALIAS OF THE NET so no consumer can accidentally read the gross; the gross is condition2_surface_m2 (audit only). 'Full strip' no longer exists — floor_strip and ceiling_strip are separate overlays.",
       rooms: roomRows().filter((r) => !r.isUnassigned || r.any).map((r) => ({
         name: r.name, ceiling_height: r.ch,
         // the floor's TYPED label (never invented by the app); "" if Jordan hasn't labelled it yet
@@ -1070,15 +1079,19 @@ export default function App() {
         contents_packout: !!property.contents_packout, contents_inventory: !!property.contents_inventory,
         contents_storage: property.contents_storage,
         skip_bin: !!property.skip_bin, asbestos_testing: !!property.asbestos_testing,
-        // LEGACY PATH (v5.0 transitional). Only roof-void shapes NOT assigned to a void room land
-        // here. Once a job's voids are drawn inside void rooms this is all zeroes and the figures
-        // live on the rooms instead. Phase 5 removes this block; until then nothing is lost and
-        // an untouched v4.x job still exports exactly as it did.
-        roof_void: {
-          decon_m2: round2(pt.decon_m2), decon_mode: property.roof_void_mode,
-          insulation_batts_m2: round2(pt.insBatts), insulation_blown_m2: round2(pt.insBlown),
-          shapes: pt.roofWorking.shapes, working: pt.roofWorking.working,
-        },
+        // v5.0 — the void is a ROOM. This block is OMITTED ENTIRELY on a clean job. It survives
+        // only while a legacy job still has roof-void shapes sitting outside a void room, so that
+        // migrating cannot silently drop a quantity; whenever it appears, a hard ERROR flag
+        // appears with it telling Jordan to move those shapes into an explicit void room.
+        // Deleting the data instead of exporting it would be the silent-loss failure this whole
+        // cycle exists to prevent — so it is omitted only when there is genuinely nothing in it.
+        ...(pt.decon_m2 > 0 || pt.insBatts > 0 || pt.insBlown > 0 ? {
+          roof_void_LEGACY_UNMIGRATED: {
+            decon_m2: round2(pt.decon_m2), decon_mode: property.roof_void_mode,
+            insulation_batts_m2: round2(pt.insBatts), insulation_blown_m2: round2(pt.insBlown),
+            shapes: pt.roofWorking.shapes, working: pt.roofWorking.working,
+          },
+        } : {}),
         floor_protection_m2: round2(pt.floorProt),   // SUMMED across every floor
       },
       flags: [
@@ -1098,6 +1111,16 @@ export default function App() {
           ? floors.filter((f) => !f.name?.trim() && (rooms.some((r) => r.floorId === f.id) || shapes.some((s) => s.floorId === f.id)))
               .map(() => `ERROR — a floor has markup but NO LABEL. Type its label (e.g. G / L1 / L2) — the app never names a floor for you.`)
           : []),
+        // v5.0 — legacy roof-void shapes still outside a void room. NOT auto-migrated: creating a
+        // void room would mean the app choosing its TYPE, and ceiling-vs-roof is a fact about the
+        // building that only Jordan knows. Guessing it would set the wrong decon rate.
+        ...(pt.decon_m2 > 0 || pt.insBatts > 0 || pt.insBlown > 0
+          ? [`ERROR — ${round2(pt.decon_m2)} m² of roof/ceiling void decon is NOT inside a void room, so it is still exported under property.roof_void_LEGACY_UNMIGRATED instead of against a floor. Add a void room on the floor it belongs to (+ Add void room, choose Ceiling void or Roof void), then reassign those shapes to it. The app will not create it for you — the void TYPE is a fact about the building, not something it can infer.`]
+          : []),
+        // A void room with no name typed — it would export name:"" and the quote could not
+        // identify it. Never auto-named, so it must be flagged.
+        ...rooms.filter((r) => r.void_type && !r.name?.trim())
+          .map((r) => `ERROR — a ${r.void_type === "roof_void" ? "roof" : "ceiling"} void room has NO NAME. Type one — the app never names a room for you.`),
         // A room NAMED like a void but with no void_type is an ordinary room. Flag it rather than
         // reinterpret it — inferring scope from a room name is the BMLJ00685 A6 defect class.
         ...rooms.filter((r) => !r.void_type && /\bvoid\b/i.test(r.name || ""))
@@ -1144,7 +1167,7 @@ export default function App() {
   const exportProject = () => {
     const filename = `${(jobName || "job").replace(/\s+/g, "_")}_markup_PROJECT.json`;
     const data = {
-      format: "bml-markup-project", version: 3, image_embedded: false,
+      format: "bml-markup-project", version: 5, image_embedded: false,
       savedAt: new Date().toISOString(),
       imgW: img?.w || 0, imgH: img?.h || 0,
       // v5.0: floors[] plus floorId-tagged rooms/shapes. calLine/scale are still written as a
