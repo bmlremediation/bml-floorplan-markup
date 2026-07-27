@@ -55,6 +55,42 @@ const CAB_HEIGHTS = [
   { value: "2.4", label: "Full 2.4 m" },
 ];
 
+// ---------- v5.0 multi-floor data model (phase 1) ----------
+// FLAT ARRAYS WITH A FLOOR TAG, never nested floors. rooms[] and shapes[] stay single flat
+// arrays and each carries a floorId, so roomRows(), buildExport(), qtyOf() and the whole
+// union / netting / perimeter geometry corrected in v4.1-v4.2 keep operating on exactly the
+// array shape they always have. Nesting would have rewritten that geometry, which is the
+// one thing this cycle is protecting.
+//
+// NO AUTO-NAMING, NO AUTO-CREATION (Jordan ruling 26 Jul 2026). A migrated or newly created
+// floor gets an EMPTY label. Floor labelling conventions vary per job (G/GF/L1 vs L1/L2), so
+// any label the app invents is a defect. Jordan types it.
+const FIRST_FLOOR_ID = "f1";
+const newFloor = (id) => ({ id, name: "", calLine: null, scale: null, imgW: 0, imgH: 0 });
+
+// In-memory migration of a v4.x record (a stored IndexedDB job OR an imported project file)
+// to the floor-tagged shape. NEVER writes back to storage — the caller decides when to
+// persist, so opening a v4.x job and exporting without saving leaves the record untouched.
+function migrateFloors(d) {
+  if (Array.isArray(d.floors) && d.floors.length) {
+    const floors = d.floors.map((f) => ({ ...newFloor(f.id), ...f }));
+    const fb = floors[0].id;
+    return {
+      floors,
+      rooms: (d.rooms || []).map((r) => ({ ...r, floorId: r.floorId ?? fb })),
+      shapes: (d.shapes || []).map((s) => ({ ...s, floorId: s.floorId ?? fb })),
+    };
+  }
+  // v4.x flat record -> one implicit floor carrying that job's calibration + image size.
+  const f = { ...newFloor(FIRST_FLOOR_ID), calLine: d.calLine || null, scale: d.scale ?? null,
+              imgW: d.imgW || 0, imgH: d.imgH || 0 };
+  return {
+    floors: [f],
+    rooms: (d.rooms || []).map((r) => ({ ...r, floorId: FIRST_FLOOR_ID })),
+    shapes: (d.shapes || []).map((s) => ({ ...s, floorId: FIRST_FLOOR_ID })),
+  };
+}
+
 const APP_VERSION = "v4.0";
 const BUILD_DATE = typeof __BUILD_DATE__ !== "undefined" ? __BUILD_DATE__ : "";
 
@@ -171,11 +207,13 @@ export default function App() {
   const [shapes, setShapes] = useState([]);
   const [selId, setSelId] = useState(null);
   const [undoStack, setUndoStack] = useState([]);
+  // floors (v5.0) — calibration and plan image are PER FLOOR; plans are routinely at
+  // different scales, so a job-wide scale would be silently wrong on every floor but one.
+  const [floors, setFloors] = useState(() => [newFloor(FIRST_FLOOR_ID)]);
+  const [activeFloor, setActiveFloor] = useState(FIRST_FLOOR_ID);
   // calibration
-  const [calLine, setCalLine] = useState(null);
   const [calInput, setCalInput] = useState("");
   const [calUnit, setCalUnit] = useState("m");
-  const [scale, setScale] = useState(null);
   const [measure, setMeasure] = useState(null);
   // property-wide scope (v3.2 — quantities/checkboxes only, never priced)
   const [property, setProperty] = useState(DEFAULT_PROPERTY);
@@ -201,6 +239,27 @@ export default function App() {
   const pendingRescale = useRef(null); // {w,h} of original image when importing a markup-only project
   const taRef = useRef(null);
 
+  // ---------- per-floor calibration (v5.0 phase 2) ----------
+  // Two DELIBERATELY different readers of scale, and the distinction is the whole point:
+  //   * `scale` / `calLine` below = the ACTIVE floor's. UI chrome only — the calibrate panel,
+  //     the measure tool, the canvas overlay, the export-enabled check. Those are all about
+  //     the floor currently on screen, so reading the active floor is correct.
+  //   * `scaleOf(shape)` = the scale of the floor that shape was DRAWN on. Every quantity
+  //     goes through this. Reading the active floor's scale to compute a quantity would
+  //     price one floor at another floor's calibration the moment a second floor exists —
+  //     the exact silent-mispricing class this cycle has been eliminating.
+  const activeFloorRec = floors.find((f) => f.id === activeFloor) || floors[0] || null;
+  const calLine = activeFloorRec?.calLine ?? null;
+  const scale = activeFloorRec?.scale ?? null;
+  const patchFloor = useCallback((floorId, patch) => {
+    setFloors((a) => a.map((f) => f.id === floorId ? { ...f, ...(typeof patch === "function" ? patch(f) : patch) } : f));
+  }, []);
+  // Accept the functional-updater form so the import auto-rescale path keeps working.
+  const setCalLine = (v) => patchFloor(activeFloor, (f) => ({ calLine: typeof v === "function" ? v(f.calLine) : v }));
+  const setScale = (v) => patchFloor(activeFloor, (f) => ({ scale: typeof v === "function" ? v(f.scale) : v }));
+  const scaleOfFloor = (floorId) => floors.find((f) => f.id === floorId)?.scale ?? null;
+  const scaleOf = (s) => scaleOfFloor(s?.floorId ?? activeFloor);
+
   // ---------- home: load job index ----------
   useEffect(() => { if (storageOk) listJobs().then(setIndex).catch(() => setIndex([])); }, [storageOk]);
 
@@ -208,7 +267,8 @@ export default function App() {
   const newJob = () => {
     const id = String(Date.now());
     setJobId(id); setJobName(""); setRooms([]); setActiveRoom(null);
-    setShapes([]); setCalLine(null); setScale(null); setSelId(null); setUndoStack([]);
+    setShapes([]); setSelId(null); setUndoStack([]);
+    setFloors([newFloor(FIRST_FLOOR_ID)]); setActiveFloor(FIRST_FLOOR_ID);
     setImg(null); idRef.current = 1; loadedRef.current = true;
     pendingRescale.current = null;
     setProperty(DEFAULT_PROPERTY);
@@ -226,9 +286,13 @@ export default function App() {
       if (!blob) alert("Floor plan image missing — re-load the image; markup is intact.");
       else src = await blobToDataURL(blob);
     }
-    setJobId(id); setJobName(meta.name || ""); setRooms(meta.rooms || []);
-    setActiveRoom(meta.rooms?.[0]?.id ?? null);
-    setShapes(meta.shapes || []); setCalLine(meta.calLine || null); setScale(meta.scale ?? null);
+    // v5.0 — migrate in memory ONLY. The stored record is left exactly as it was until the
+    // user actually changes something and autosave fires.
+    const mig = migrateFloors(meta);
+    setJobId(id); setJobName(meta.name || ""); setRooms(mig.rooms);
+    setActiveRoom(mig.rooms[0]?.id ?? null);
+    setShapes(mig.shapes); setFloors(mig.floors);
+    setActiveFloor(meta.activeFloor && mig.floors.some((f) => f.id === meta.activeFloor) ? meta.activeFloor : mig.floors[0].id);
     setSelId(null); setUndoStack([]);
     setProperty({ ...DEFAULT_PROPERTY, ...(meta.property || {}) });
     setHiddenCats(new Set()); setHiddenRooms(new Set());
@@ -252,9 +316,17 @@ export default function App() {
     if (!storageOk || !jobId) return;
     setSaveState("saving");
     try {
+      const w = imgW ?? img?.w ?? 0, h = imgH ?? img?.h ?? 0;
+      // keep the active floor's stored image size in step with what's on screen
+      const outFloors = floors.map((f) => f.id === activeFloor ? { ...f, imgW: w, imgH: h } : f);
       const meta = {
-        id: jobId, name: jobName, rooms, shapes, calLine, scale, property,
-        imgW: imgW ?? img?.w ?? 0, imgH: imgH ?? img?.h ?? 0,
+        id: jobId, name: jobName, rooms, shapes, property,
+        floors: outFloors, activeFloor,
+        // Legacy v4.x mirror — keeps this record readable by the live v4.2 app. Mirrors the
+        // FIRST floor only, so once a job genuinely has multiple floors this is a lossy
+        // back-read, not a backup. Dropped when v5.0 ships and the live app can read floors[].
+        calLine: outFloors[0]?.calLine ?? null, scale: outFloors[0]?.scale ?? null,
+        imgW: w, imgH: h,
         savedAt: new Date().toISOString(),
       };
       await putJob(meta);
@@ -262,7 +334,7 @@ export default function App() {
       setIndex((prev) => [entry, ...prev.filter((j) => j.id !== jobId)]);
       setSaveState("saved");
     } catch { setSaveState("error"); }
-  }, [storageOk, jobId, jobName, rooms, shapes, calLine, scale, property, img]);
+  }, [storageOk, jobId, jobName, rooms, shapes, floors, activeFloor, property, img]);
 
   // autosave (debounced) on any markup change
   useEffect(() => {
@@ -271,7 +343,7 @@ export default function App() {
     clearTimeout(saveTimer.current);
     saveTimer.current = setTimeout(() => persistMeta(), 1200);
     return () => clearTimeout(saveTimer.current);
-  }, [shapes, rooms, jobName, scale, calLine, property]); // eslint-disable-line
+  }, [shapes, rooms, jobName, floors, property]); // eslint-disable-line
 
   // ---------- image input (compress -> persist as Blob) ----------
   const loadImageFile = (file) => {
@@ -391,10 +463,10 @@ export default function App() {
       const cat = catById(activeCat);
       pushUndo();
       const s = cat.kind === "fill"
-        ? { id: nid(), type: "rect", cat: cat.id, room: activeRoom, x: pt.x, y: pt.y, w: 0, h: 0,
+        ? { id: nid(), type: "rect", cat: cat.id, room: activeRoom, floorId: activeFloor, x: pt.x, y: pt.y, w: 0, h: 0,
             ...(cat.id === "roof_void_decon" ? { insulation: roofInsulation, insulationType: roofInsulationType } : {}),
             ...(cat.id === "cabinetry" ? { cabH: cabHgt === "custom" ? cabHgtCustom : cabHgt } : {}) }
-        : { id: nid(), type: "line", cat: cat.id, room: activeRoom, x1: pt.x, y1: pt.y, x2: pt.x, y2: pt.y,
+        : { id: nid(), type: "line", cat: cat.id, room: activeRoom, floorId: activeFloor, x1: pt.x, y1: pt.y, x2: pt.x, y2: pt.y,
             ...(cat.id === "wall_strip" ? { hgt: wallHgt, cornice: wallCornice, skirting: wallSkirting, skirtingOnly: wallSkirtingOnly } : {}) };
       setShapes((a) => [...a, s]);
       drag.current = { mode: "new", id: s.id, sx: pt.x, sy: pt.y };
@@ -518,7 +590,7 @@ export default function App() {
   const chOf = (room) => parseFloat(room?.ch) || 2.4; // room.ch is stored as a raw string (decimal-entry fix, v3.2)
   const roomCH = (roomId) => chOf(rooms.find((r) => r.id === roomId));
   const wallEffHeight = (s) => (s.hgt === "full" || s.hgt == null ? roomCH(s.room) : s.hgt);
-  const lenOf = (s) => Math.hypot(s.x2 - s.x1, s.y2 - s.y1) * scale; // raw line length in m
+  const lenOf = (s) => Math.hypot(s.x2 - s.x1, s.y2 - s.y1) * (scaleOf(s) || 0); // m, at THIS shape's floor scale
   // v4.0 — cabinetry FACE area. Cabinetry is priced on the VERTICAL FACE it presents, never on
   // its plan footprint: a 2.4 m full-height unit and a 0.9 m base unit with identical footprints
   // are not the same job. face = perimeter x height (Jordan ruling, 26 Jul 2026 — supersedes the
@@ -526,9 +598,10 @@ export default function App() {
   // chosen in the app and computed BEFORE export.
   const cabHOf = (s) => parseFloat(s.cabH) || null;      // null = not yet selected
   const cabFaceOf = (s) => {
-    if (!scale) return 0;
+    const sc = scaleOf(s);
+    if (!sc) return 0;
     const h = cabHOf(s); if (!h) return 0;               // unset height -> 0 + a hard validation flag
-    const Lm = s.w * scale, Wm = s.h * scale;
+    const Lm = s.w * sc, Wm = s.h * sc;
     // v4.1 (Jordan ruling 26 Jul): face = vertical wrap + TOP. The top is a real removed/cleaned
     // surface. Base is excluded (sits on the floor). Shelves, drawers and carcass divisions are
     // still excluded — this stays a deliberately CONSERVATIVE convention, not a true surface total.
@@ -539,9 +612,10 @@ export default function App() {
   // Computing a surface per shape gave every shape its own perimeter and FABRICATED internal walls
   // that do not physically exist, inflating decon on every multi-shape room (BMLJ00685 A2).
   const qtyOf = (s) => {
-    if (!scale) return null;
+    const sc = scaleOf(s);
+    if (!sc) return null;
     if (s.type === "rect") {
-      const area = s.w * s.h * scale * scale;
+      const area = s.w * s.h * sc * sc;
       if (s.cat === "cabinetry") return cabFaceOf(s);     // FACE m², not footprint
       return area;                                       // condition2 -> footprint (combined later)
     }
@@ -550,17 +624,18 @@ export default function App() {
     return len;
   };
   const shapeLabel = (s) => {
-    if (!scale) return "no scale";
+    const sc = scaleOf(s);
+    if (!sc) return "no scale";
     if (s.cat === "containment") return "containment";
     if (s.cat === "wall_strip" && s.skirtingOnly) return `${fmt(lenOf(s))} m skirting`;
     const q = qtyOf(s);
     if (s.cat === "cabinetry") {
-      const L = s.w * scale, W = s.h * scale, h = cabHOf(s);
+      const L = s.w * sc, W = s.h * sc, h = cabHOf(s);
       if (!h) return `${fmt(L)}×${fmt(W)} m — set height ⚠`;
       return `${fmt(L)}×${fmt(W)} m, h=${fmt(h, 2)} = ${fmt(q)} m² face`;
     }
     if (s.type === "rect") {
-      const L = s.w * scale, W = s.h * scale;
+      const L = s.w * sc, W = s.h * sc;
       return s.cat === "condition2" ? `${fmt(L)}×${fmt(W)} m = ${fmt(q)} m² fp` : `${fmt(L)}×${fmt(W)} m = ${fmt(q)} m²`;
     }
     if (s.cat === "wall_strip") {
@@ -576,10 +651,18 @@ export default function App() {
       // property-scope shapes (roof void / floor protection) never belong to a per-room row
       const rs = shapes.filter((s) => (s.room ?? null) === rid && !catById(s.cat)?.propertyScope);
       if (!room && rs.length === 0) return null;
+      // Room-level scale: every shape in a room is measured at that ROOM's floor's scale.
+      // Per-shape helpers (qtyOf/lenOf) resolve it themselves; the C2 union and the raw
+      // w/l dimension strings below operate on a GROUP of rects and so need one scale.
+      // The "Unassigned" pseudo-row has no room and therefore no floor, so it falls back to
+      // its first shape's floor — it is a flagged, not-for-pricing row either way.
+      const rowScale = (room ? scaleOfFloor(room.floorId) : (rs.length ? scaleOf(rs[0]) : null)) || 0;
       const row = {
         name: room ? room.name : "Unassigned", ch: room ? chOf(room) : 2.4, isUnassigned: !room,
         plumbIso: room ? !!room.plumbIso : false, elecIso: room ? !!room.elecIso : false,
         counts: {}, wallLinm: 0, corniceLinm: 0, skirtingLinm: 0, any: rs.length > 0,
+        // a shape whose own floor disagrees with its room's is a data defect, never averaged
+        floorMismatch: !!room && rs.some((s) => (s.floorId ?? room.floorId) !== room.floorId),
       };
       for (const c of CATS) {
         const cs = rs.filter((s) => s.cat === c.id);
@@ -620,7 +703,7 @@ export default function App() {
       // raw footprints would double-count any overlap.
       const c2s = rs.filter((s) => s.cat === "condition2");
       const c2Shapes = c2s.map((s) => ({
-        s, w: round2(s.w * scale), l: round2(s.h * scale), m2: round2(s.w * s.h * scale * scale),
+        s, w: round2(s.w * rowScale), l: round2(s.h * rowScale), m2: round2(s.w * s.h * rowScale * rowScale),
         h_override: parseFloat(s.c2H) || null,
       }));
       const groups = new Map(); // effective height -> shape entries
@@ -635,8 +718,8 @@ export default function App() {
       for (const [h, group] of groupEntries) {
         const rects = group.map((g) => ({ x: g.s.x, y: g.s.y, w: g.s.w, h: g.s.h }));
         const sumFootprints = group.reduce((a, g) => a + g.m2, 0);
-        const unionM2raw = unionAreaPx(rects) * scale * scale;
-        const unionPerimM = unionPerimeterPx(rects) * scale;
+        const unionM2raw = unionAreaPx(rects) * rowScale * rowScale;
+        const unionPerimM = unionPerimeterPx(rects) * rowScale;
         const gNetted = round2(unionM2raw) < round2(sumFootprints);
         if (gNetted) overlapNetted = true;
         c2Footprint += unionM2raw;
@@ -662,7 +745,7 @@ export default function App() {
       } else {
         const parts = groupEntries.map(([h, group]) => {
           const label = group.length > 1 ? `[${group.map((g) => `(${g.w}×${g.l})`).join("+")}]` : `(${group[0].w}×${group[0].l})`;
-          const gFp = round2(unionAreaPx(group.map((g) => ({ x: g.s.x, y: g.s.y, w: g.s.w, h: g.s.h }))) * scale * scale);
+          const gFp = round2(unionAreaPx(group.map((g) => ({ x: g.s.x, y: g.s.y, w: g.s.w, h: g.s.h }))) * rowScale * rowScale);
           return `${label} fp=${gFp} ×(2+${h}H) = ${round2(gFp * (2 + h))}`;
         });
         c2Working = `${parts.join(" + ")} → surface Σ = ${round2(c2Surface)} → −(${round2(c2Deduct)}) = ${round2(c2Net)}`;
@@ -683,16 +766,16 @@ export default function App() {
       // D1.3 — cabinetry working (footprint -> perimeter x height -> face).
       const cabShapes = rs.filter((s) => s.cat === "cabinetry");
       row.cabMissingH = cabShapes.some((s) => !cabHOf(s));
-      row.cabFootprint = cabShapes.reduce((a, s) => a + s.w * s.h * scale * scale, 0);
+      row.cabFootprint = cabShapes.reduce((a, s) => a + s.w * s.h * rowScale * rowScale, 0);
       row.cabWorking = {
         shapes: cabShapes.map((s) => {
-          const L = round2(s.w * scale), W = round2(s.h * scale), h = cabHOf(s), perimeter_m = round2(2 * (L + W));
+          const L = round2(s.w * rowScale), W = round2(s.h * rowScale), h = cabHOf(s), perimeter_m = round2(2 * (L + W));
           return { w: L, l: W, perimeter_m, height_m: h, face_m2: h ? round2(perimeter_m * h) : 0 };
         }),
         footprint_m2: round2(row.cabFootprint), face_m2: round2(row.counts.cabinetry),
         working: cabShapes.length
           ? cabShapes.map((s) => {
-              const L = round2(s.w * scale), W = round2(s.h * scale), h = cabHOf(s);
+              const L = round2(s.w * rowScale), W = round2(s.h * rowScale), h = cabHOf(s);
               return h ? `(2×(${L}+${W}))×${h}` : `(${L}×${W}) NO HEIGHT`;
             }).join(" + ") + ` = ${round2(row.counts.cabinetry)} m² face`
           : "no cabinetry drawn",
@@ -709,11 +792,12 @@ export default function App() {
     const floorProt = shapes.filter((s) => s.cat === "floor_protection").reduce((a, s) => a + (qtyOf(s) || 0), 0);
     // D1.3 — roof-void working (shape list + human-readable calculation).
     const roofWorking = {
-      shapes: roofShapes.map((s) => ({ w: round2(s.w * scale), l: round2(s.h * scale), m2: round2(qtyOf(s) || 0),
+      // property-scope shapes can sit on ANY floor, so each is dimensioned at its own floor's scale
+      shapes: roofShapes.map((s) => ({ w: round2(s.w * (scaleOf(s) || 0)), l: round2(s.h * (scaleOf(s) || 0)), m2: round2(qtyOf(s) || 0),
         insulation: !!s.insulation, insulationType: s.insulation ? s.insulationType : null })),
       decon_m2: round2(decon_m2), insulation_batts_m2: round2(insBatts), insulation_blown_m2: round2(insBlown),
       working: roofShapes.length
-        ? roofShapes.map((s) => `(${round2(s.w * scale)}×${round2(s.h * scale)})`).join(" + ") + ` = ${round2(decon_m2)} m² decon`
+        ? roofShapes.map((s) => `(${round2(s.w * (scaleOf(s) || 0))}×${round2(s.h * (scaleOf(s) || 0))})`).join(" + ") + ` = ${round2(decon_m2)} m² decon`
         : "no roof void zone drawn",
     };
     return { decon_m2, insBatts, insBlown, floorProt, roofWorking };
@@ -858,6 +942,14 @@ export default function App() {
       flags: [
         ...(shapes.some((s) => s.room == null && !catById(s.cat)?.propertyScope) ? ["UNASSIGNED shapes present — reassign before pricing"] : []),
         ...(!scale ? ["NOT CALIBRATED — quantities invalid"] : []),
+        // v5.0 per-floor guards. Only emit once a job genuinely has more than one floor, so a
+        // single-floor v4.x job still exports byte-identically to v4.2.
+        ...(floors.length > 1
+          ? floors.filter((f) => !f.scale && shapes.some((s) => s.floorId === f.id))
+              .map((f) => `ERROR — floor "${f.name || f.id}" has markup but NO CALIBRATION. Its quantities are invalid; calibrate that floor's plan.`)
+          : []),
+        ...roomRows().filter((r) => r.floorMismatch)
+          .map((r) => `ERROR — ${r.name}: contains shapes drawn on a different floor to the room itself. Those shapes' coordinates and scale disagree — reassign them, do not price this room.`),
         // ---- v4.0 D1.6 hard-error validations. A quantity that is not physically plausible must
         // never leave the app silently: every one of these passed every downstream gate before.
         ...roomRows().filter((r) => r.any && r.c2 && r.c2.shapes.length && r.c2.net_m2 <= 0)
@@ -899,7 +991,10 @@ export default function App() {
       format: "bml-markup-project", version: 3, image_embedded: false,
       savedAt: new Date().toISOString(),
       imgW: img?.w || 0, imgH: img?.h || 0,
-      jobName, rooms, shapes, calLine, scale, property,
+      // v5.0: floors[] plus floorId-tagged rooms/shapes. calLine/scale are still written as a
+      // first-floor mirror so the live v4.2 app can still read a file saved from here.
+      jobName, rooms, shapes, property, floors, activeFloor,
+      calLine: floors[0]?.calLine ?? null, scale: floors[0]?.scale ?? null,
     };
     const text = JSON.stringify(data);
     downloadFile(filename, text);
@@ -942,9 +1037,12 @@ export default function App() {
         if (out.cat === "wall_strip" && out.hgt == null) out = { ...out, hgt: "full" };
         return out;
       });
-      setJobId(id); setJobName(d.jobName || ""); setRooms(d.rooms || []);
-      setActiveRoom(d.rooms?.[0]?.id ?? null);
-      setShapes(shapes); setCalLine(d.calLine || null); setScale(d.scale ?? null);
+      // v5.0 — same in-memory migration as openJob; a v2/v3/v4 project file becomes one floor.
+      const mig = migrateFloors({ ...d, shapes });
+      setJobId(id); setJobName(d.jobName || ""); setRooms(mig.rooms);
+      setActiveRoom(mig.rooms[0]?.id ?? null);
+      setShapes(mig.shapes); setFloors(mig.floors);
+      setActiveFloor(d.activeFloor && mig.floors.some((f) => f.id === d.activeFloor) ? d.activeFloor : mig.floors[0].id);
       setSelId(null); setUndoStack([]);
       setProperty({ ...DEFAULT_PROPERTY, ...(d.property || {}) });
       setHiddenCats(new Set()); setHiddenRooms(new Set());
@@ -988,7 +1086,7 @@ export default function App() {
   const [newRoom, setNewRoom] = useState("");
   const addRoom = () => {
     const n = newRoom.trim(); if (!n) return;
-    const r = { id: nid(), name: n, ch: "2.4", plumbIso: false, elecIso: false };
+    const r = { id: nid(), name: n, ch: "2.4", plumbIso: false, elecIso: false, floorId: activeFloor };
     setRooms((a) => [...a, r]); setActiveRoom(r.id); setNewRoom("");
   };
 
@@ -1324,7 +1422,11 @@ export default function App() {
                     <select style={{ ...st.selectEl, flex: 1 }} value={sel.room ?? ""}
                       onChange={(e) => { pushUndo(); const v = e.target.value ? Number(e.target.value) : null; setShapes((a) => a.map((s) => s.id === sel.id ? { ...s, room: v } : s)); }}>
                       <option value="">Unassigned</option>
-                      {rooms.map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
+                      {/* Active floor's rooms ONLY. Reassigning a shape to a room on another
+                          floor would keep its coordinates in this floor's pixel space while
+                          quantifying them at the other floor's scale — silent cross-floor
+                          mispricing reached through the UI instead of a missed call site. */}
+                      {rooms.filter((r) => (r.floorId ?? activeFloor) === activeFloor).map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
                     </select>
                     <button style={btn(false)} onClick={() => { pushUndo(); setShapes((a) => a.filter((s) => s.id !== sel.id)); setSelId(null); }}>Delete</button>
                   </div>
