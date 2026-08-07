@@ -1157,6 +1157,128 @@ export default function App() {
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   };
 
+  // ---------- v6.0 item 1: scope image (PNG) ----------
+  // The markup already carries the whole scope visually; today that picture only exists on
+  // screen. This renders it as a figure for a quote or an ops handoff. ONE IMAGE PER FLOOR —
+  // shape coordinates live in their own floor's plan pixel space, so floors cannot be combined.
+  // Rendered at the STORED PLAN RESOLUTION, not the zoomed viewport, or text is unreadable on
+  // a 4000 px plan. Not client-branded: it is a figure, not a standalone deliverable.
+  const hexToRgba = (hex, a) => {
+    const h = hex.replace("#", "");
+    const n = parseInt(h.length === 3 ? h.split("").map((x) => x + x).join("") : h, 16);
+    return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${a})`;
+  };
+  // Legend quantities must match what the QUOTE says, or the image recreates the confusion it
+  // exists to remove: Condition 2 is the NET, cabinetry is FACE, containment is a count.
+  const scopeLegendEntries = (fid, fShapes) => {
+    const rowsF = roomRows().filter((r) => r.floorId === fid);
+    const out = [];
+    for (const c of CATS) {
+      const cs = fShapes.filter((s) => s.cat === c.id);
+      if (!cs.length) continue;
+      const sum = (arr, fn) => arr.reduce((a, s) => a + (fn(s) || 0), 0);
+      let text;
+      if (c.id === "containment") text = `${cs.length} ×`;
+      else if (c.id === "condition2") text = `${fmt(round2(rowsF.reduce((a, r) => a + (r.counts.condition2 || 0), 0)))} m² net`;
+      // Cabinetry with no height set computes 0. Printing a confident "0.00 m²" onto a figure
+      // that goes out with a quote is how a scope silently loses a line — say so instead.
+      else if (c.id === "cabinetry") text = cs.some((s) => !cabHOf(s))
+        ? "height not set ⚠" : `${fmt(round2(sum(cs, qtyOf)))} m² face`;
+      else if (c.id === "wall_strip") text = `${fmt(round2(sum(cs, qtyOf)))} m² · ${fmt(round2(sum(cs.filter((s) => !s.skirtingOnly), lenOf)))} Lm`;
+      else text = `${fmt(round2(sum(cs, qtyOf)))} m²`;
+      out.push({ color: c.color, kind: c.kind, label: c.label, text });
+    }
+    return out;
+  };
+  const exportScopeImage = async () => {
+    if (!img) { alert("Load this floor's plan image first — the scope image is drawn on the plan."); return; }
+    const fid = activeFloor;
+    const fRec = activeFloorRec;
+    const fShapes = shapes.filter((s) => (s.floorId ?? fid) === fid);
+    if (!fShapes.length) { alert("Nothing is marked up on this floor yet."); return; }
+    const entries = scopeLegendEntries(fid, fShapes);
+    try {
+      const im = await new Promise((res, rej) => {
+        const el = new Image();
+        el.onload = () => res(el); el.onerror = rej; el.src = img.src;
+      });
+      const W0 = img.w, H0 = img.h;
+      const fs = Math.max(13, Math.round(W0 / 85));          // scale type to the plan, not the screen
+      const PAD = Math.round(fs * 1.2);
+      const headerH = Math.round(fs * 3.4);
+      const rowH = Math.round(fs * 1.75);
+      const cols = entries.length > 7 ? 2 : 1;
+      const legendH = entries.length ? Math.round(fs * 1.6) + Math.ceil(entries.length / cols) * rowH : 0;
+      const footerH = Math.round(fs * 2.2);
+      const W = W0 + PAD * 2, H = headerH + H0 + legendH + footerH;
+      const cv = document.createElement("canvas");
+      cv.width = W; cv.height = H;
+      const g = cv.getContext("2d");
+      g.fillStyle = "#ffffff"; g.fillRect(0, 0, W, H);
+      // header
+      g.fillStyle = "#111"; g.textBaseline = "top";
+      g.font = `600 ${Math.round(fs * 1.15)}px system-ui, sans-serif`;
+      g.fillText(jobName || "UNNAMED JOB", PAD, Math.round(fs * 0.6));
+      g.font = `${fs}px system-ui, sans-serif`; g.fillStyle = "#444";
+      g.fillText(`Scope markup${fRec?.name?.trim() ? ` — floor ${fRec.name.trim()}` : ""}`, PAD, Math.round(fs * 2.0));
+      // plan + shapes
+      g.drawImage(im, PAD, headerH, W0, H0);
+      g.save();
+      g.translate(PAD, headerH);
+      for (const s of fShapes) {
+        const c = catById(s.cat); if (!c) continue;
+        if (s.type === "rect") {
+          g.fillStyle = hexToRgba(c.color, FILL_OPACITY);
+          g.fillRect(s.x, s.y, s.w, s.h);
+          g.strokeStyle = c.color; g.lineWidth = Math.max(1.5, fs / 9); g.setLineDash([]);
+          g.strokeRect(s.x, s.y, s.w, s.h);
+        } else {
+          g.strokeStyle = c.color; g.lineWidth = Math.max(3, fs / 4); g.lineCap = "round";
+          g.setLineDash(s.skirtingOnly ? [fs / 2, fs / 3] : []);
+          g.beginPath(); g.moveTo(s.x1, s.y1); g.lineTo(s.x2, s.y2); g.stroke();
+          g.setLineDash([]);
+        }
+      }
+      g.restore();
+      // legend — only what is actually on THIS plan, never the full catalogue
+      let y = headerH + H0 + Math.round(fs * 0.5);
+      g.fillStyle = "#111"; g.font = `600 ${fs}px system-ui, sans-serif`;
+      g.fillText("KEY", PAD, y);
+      y += Math.round(fs * 1.5);
+      const colW = Math.floor((W - PAD * 2) / cols);
+      entries.forEach((e, i) => {
+        const cx = PAD + (i % cols) * colW;
+        const cy = y + Math.floor(i / cols) * rowH;
+        const sw = Math.round(fs * 1.1);
+        g.fillStyle = hexToRgba(e.color, e.kind === "line" ? 1 : FILL_OPACITY);
+        g.fillRect(cx, cy + Math.round(fs * 0.2), sw, e.kind === "line" ? Math.round(fs * 0.35) : sw);
+        g.strokeStyle = e.color; g.lineWidth = 1.5;
+        g.strokeRect(cx, cy + Math.round(fs * 0.2), sw, e.kind === "line" ? Math.round(fs * 0.35) : sw);
+        g.fillStyle = "#111"; g.font = `${Math.round(fs * 0.92)}px system-ui, sans-serif`;
+        g.fillText(e.label, cx + sw + Math.round(fs * 0.6), cy + Math.round(fs * 0.15));
+        g.font = `600 ${Math.round(fs * 0.92)}px system-ui, sans-serif`;
+        const tw = g.measureText(e.text).width;
+        g.fillText(e.text, cx + colW - tw - Math.round(fs * 0.8), cy + Math.round(fs * 0.15));
+      });
+      // footer
+      g.fillStyle = "#666"; g.font = `${Math.round(fs * 0.8)}px system-ui, sans-serif`;
+      g.fillText(`${new Date().toLocaleDateString("en-AU")} · bml-floorplan-markup ${APP_VERSION} · quantities only, not a priced document`,
+        PAD, H - footerH + Math.round(fs * 0.5));
+
+      const jobNo = (jobName.match(/BMLJ\d+/i) || [])[0] || (jobName || "job").replace(/\s+/g, "_").slice(0, 40);
+      const floorLbl = (fRec?.name?.trim() || "Floor").replace(/[^\w-]+/g, "_");
+      const filename = `${jobNo}_Scope_${floorLbl}.png`;
+      cv.toBlob((blob) => {
+        if (!blob) { alert("Could not render the scope image."); return; }
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url; a.download = filename;
+        document.body.appendChild(a); a.click(); a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+      }, "image/png");
+    } catch { alert("Could not render the scope image."); }
+  };
+
   const exportQuantities = () => {
     const filename = `${(jobName || "job").replace(/\s+/g, "_")}_markup_quantities.json`;
     const text = JSON.stringify(buildExport(), null, 2);
@@ -1818,6 +1940,12 @@ export default function App() {
           <button style={{ ...btn(false), background: "#2f6df6", borderColor: "#2f6df6", color: "#fff" }}
             onClick={exportQuantities} disabled={!floors.some((f) => f.scale) || !shapes.length}>
             Download quantities JSON
+          </button>
+          {/* v6.0 — one image per floor; exports the floor currently on screen */}
+          <button style={btn(false)} onClick={exportScopeImage}
+            disabled={!img || !shapes.some((s) => (s.floorId ?? activeFloor) === activeFloor)}
+            title="Renders this floor's plan with every shape and a key, for a quote figure or ops handoff">
+            Export scope image (PNG){floors.length > 1 && activeFloorRec?.name?.trim() ? ` — ${activeFloorRec.name.trim()}` : ""}
           </button>
           <div style={st.row}>
             <button style={{ ...btn(false), flex: 1 }} onClick={exportProject} disabled={!shapes.length && !rooms.length}>
