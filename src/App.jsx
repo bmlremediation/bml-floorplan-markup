@@ -22,6 +22,10 @@ const CATS = [
   { id: "floor_protection", label: "Floor protection",                          kind: "fill", color: "#9E9E9E", propertyScope: true },
 ];
 const catById = (id) => CATS.find((c) => c.id === id);
+// v6.0 item 3 — categories that can carry an insulation-removal flag. A strip-ceiling and a
+// roof-void shape routinely cover the SAME void from two directions; where both are flagged the
+// overlap must be counted ONCE (see computeInsulationRemoval).
+const INSULATION_CATS = new Set(["roof_void_decon", "ceiling_strip"]);
 const FILL_OPACITY = 0.35;
 const MIN_PX = 4;
 
@@ -546,7 +550,7 @@ export default function App() {
       pushUndo();
       const s = cat.kind === "fill"
         ? { id: nid(), type: "rect", cat: cat.id, room: activeRoom, floorId: activeFloor, x: pt.x, y: pt.y, w: 0, h: 0,
-            ...(cat.id === "roof_void_decon" ? { insulation: roofInsulation, insulationType: roofInsulationType } : {}),
+            ...(INSULATION_CATS.has(cat.id) ? { insulation: roofInsulation, insulationType: roofInsulationType } : {}),
             ...(cat.id === "cabinetry" ? { cabH: cabHgt === "custom" ? cabHgtCustom : cabHgt } : {}) }
         : { id: nid(), type: "line", cat: cat.id, room: activeRoom, floorId: activeFloor, x1: pt.x, y1: pt.y, x2: pt.x, y2: pt.y,
             ...(cat.id === "wall_strip" ? { hgt: wallHgt, cornice: wallCornice, skirting: wallSkirting, skirtingOnly: wallSkirtingOnly } : {}) };
@@ -920,6 +924,53 @@ export default function App() {
     };
     return { decon_m2, insBatts, insBlown, floorProt, roofWorking };
   };
+  // ---------- v6.0 item 3: insulation removal, DE-DUPLICATED ----------
+  // A strip-ceiling shape and a roof-void shape routinely cover the same void from two
+  // directions. Summing them over-charges the client by the overlap, and it is INVISIBLE on
+  // inspection because each shape looks individually correct — the same failure mode as the
+  // Condition 2 double-count. So the area is the geometric UNION, never the sum.
+  //
+  // Unioned PER FLOOR (shape coordinates only share a pixel space within one floor) and PER
+  // TYPE (you cannot pull batts and blown-in out of the same square metre, and they price
+  // differently). Where the two types overlap, that is physically contradictory and almost
+  // certainly a markup error, so it is FLAGGED rather than silently resolved either way.
+  // unionAreaPx snaps near-coincident edges first — without that, hand-drawn shapes meant to
+  // coincide sit 12.9-19.3 mm apart and the union degenerates back to the sum.
+  const computeInsulationRemoval = () => {
+    const flagged = shapes.filter((s) => s.type === "rect" && s.insulation && INSULATION_CATS.has(s.cat));
+    const byFloor = [];
+    let batts = 0, blown = 0, all = 0, crossOverlap = false;
+    for (const f of floors) {
+      const fs = flagged.filter((s) => (s.floorId ?? f.id) === f.id && s.floorId === f.id);
+      if (!fs.length) continue;
+      const sc = f.scale;
+      const toRect = (s) => ({ x: s.x, y: s.y, w: s.w, h: s.h });
+      const areaOf = (arr) => sc ? unionAreaPx(arr.map(toRect)) * sc * sc : 0;
+      const bShapes = fs.filter((s) => s.insulationType !== "blown_in");   // default/batts
+      const nShapes = fs.filter((s) => s.insulationType === "blown_in");
+      const bA = areaOf(bShapes), nA = areaOf(nShapes), allA = areaOf(fs);
+      // union(all) < union(batts)+union(blown) means the two TYPES overlap each other
+      const cross = round2(allA) < round2(bA + nA);
+      if (cross) crossOverlap = true;
+      const rawSum = sc ? fs.reduce((a, s) => a + s.w * s.h * sc * sc, 0) : 0;
+      batts += bA; blown += nA; all += allA;
+      byFloor.push({
+        floor: f.name || "", batts_m2: round2(bA), blown_in_m2: round2(nA),
+        raw_sum_m2: round2(rawSum), netted_m2: round2(allA),
+        overlap_netted: round2(allA) < round2(rawSum), cross_type_overlap: cross,
+        shape_ids: fs.map((s) => s.id),
+        working: `union of ${fs.length} insulation-flagged shape(s) [${fs.map((s) => s.id).join(", ")}] = ${round2(allA)} m² (raw sum ${round2(rawSum)} m²)`,
+      });
+    }
+    // total_m2 is the union of ALL insulation shapes, so it can NEVER be overstated — not the
+    // sum of the per-type unions, which would double-count any area where the two types overlap.
+    // When they do overlap the SPLIT is what becomes unreliable, and that is what gets flagged.
+    return { batts_m2: round2(batts), blown_in_m2: round2(blown), total_m2: round2(all),
+             cross_type_overlap: crossOverlap, by_floor: byFloor,
+             split_exceeds_total: round2(batts + blown) > round2(all),
+             overlap_netted: byFloor.some((b) => b.overlap_netted) };
+  };
+
   // Per-category display lines for the quantities panel — floor/ceiling strip each
   // produce two labelled outputs from the same underlying figure (strip + matching decon).
   const categoryLines = (c, row) => {
@@ -1004,6 +1055,7 @@ export default function App() {
   const round2 = (v) => Math.round(v * 100) / 100;
   const buildExport = () => {
     const pt = computePropertyTotals();
+    const ins = computeInsulationRemoval();
     return {
       job: jobName || "UNNAMED JOB",
       exported_at: new Date().toISOString(),
@@ -1098,6 +1150,14 @@ export default function App() {
           },
         } : {}),
         floor_protection_m2: round2(pt.floorProt),   // SUMMED across every floor
+        // v6.0 item 3 — AUTHORITATIVE insulation-removal quantity. Already de-duplicated: the
+        // geometric UNION per floor and per type of every insulation-flagged shape, whether it
+        // came from a strip-ceiling or a roof-void shape. PRICE THIS. The per-room
+        // insulation_batts_m2 / insulation_blown_m2 on void rooms are AUDIT ONLY and will
+        // double-charge the overlap if summed — they are the un-netted per-room contributions.
+        insulation_removal: { ...ins,
+          _note: "AUTHORITATIVE and ALREADY NETTED (geometric union per floor, per type, with near-coincident edges snapped). Price total_m2 / batts_m2 / blown_in_m2 from HERE. Do NOT sum the per-room insulation_batts_m2 / insulation_blown_m2 figures — those are un-netted per-room contributions kept for audit, and summing them double-charges any overlap between a strip-ceiling and a roof-void shape covering the same void.",
+        },
       },
       flags: [
         ...(shapes.some((s) => s.room == null && !catById(s.cat)?.propertyScope) ? ["UNASSIGNED shapes present — reassign before pricing"] : []),
@@ -1121,6 +1181,10 @@ export default function App() {
         // building that only Jordan knows. Guessing it would set the wrong decon rate.
         ...(pt.decon_m2 > 0 || pt.insBatts > 0 || pt.insBlown > 0
           ? [`ERROR — ${round2(pt.decon_m2)} m² of roof/ceiling void decon is NOT inside a void room, so it is still exported under property.roof_void_LEGACY_UNMIGRATED instead of against a floor. Add a void room on the floor it belongs to (+ Add void room, choose Ceiling void or Roof void), then reassign those shapes to it. The app will not create it for you — the void TYPE is a fact about the building, not something it can infer.`]
+          : []),
+        // v6.0 item 3 — batts and blown-in cannot both come out of the same square metre.
+        ...(ins.cross_type_overlap
+          ? [`ERROR — insulation shapes of DIFFERENT types (batts vs blown-in) OVERLAP by ${round2(ins.batts_m2 + ins.blown_in_m2 - ins.total_m2)} m². The same area cannot have both removed, so one of them is wrong. total_m2 (${ins.total_m2}) is the union of everything and is safe to price; the batts/blown-in SPLIT is NOT — those two figures sum to more than the total, and they price differently. Fix the markup before relying on the split.`]
           : []),
         // A void room with no name typed — it would export name:"" and the quote could not
         // identify it. Never auto-named, so it must be flagged.
@@ -1494,7 +1558,8 @@ export default function App() {
   }
 
   const propertyTotals = computePropertyTotals();
-  const anyPropertyEntered = propertyTotals.decon_m2 > 0 || propertyTotals.insBatts > 0 || propertyTotals.insBlown > 0 ||
+  const insulationTotals = computeInsulationRemoval();
+  const anyPropertyEntered = propertyTotals.decon_m2 > 0 || insulationTotals.total_m2 > 0 ||
     propertyTotals.floorProt > 0 || parseFloat(property.afd_units) > 0 || parseFloat(property.dehum_units) > 0 ||
     parseFloat(property.drymatic_units) > 0 || parseFloat(property.drying_mat_units) > 0 || parseFloat(property.air_mover_units) > 0 ||
     parseFloat(property.dbkii_days) > 0 || parseFloat(property.ac_ducted_units) > 0 || parseFloat(property.ac_split_units) > 0 ||
@@ -1675,7 +1740,7 @@ export default function App() {
                   </label>
                 </div>
               )}
-              {activeCat === "roof_void_decon" && (
+              {INSULATION_CATS.has(activeCat) && (
                 <div style={st.selBox}>
                   <label style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 11.5 }}>
                     <input type="checkbox" checked={roofInsulation} onChange={(e) => setRoofInsulation(e.target.checked)} /> Include insulation removal
@@ -1743,7 +1808,7 @@ export default function App() {
                       </label>
                     </>
                   )}
-                  {sel.cat === "roof_void_decon" && (
+                  {INSULATION_CATS.has(sel.cat) && (
                     <>
                       <label style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 11.5 }}>
                         <input type="checkbox" checked={!!sel.insulation}
@@ -1911,8 +1976,17 @@ export default function App() {
                 <div style={st.qRoom}>
                   <div style={{ fontWeight: 600 }}>Property-wide</div>
                   {propertyTotals.decon_m2 > 0 && qline(`Roof void / cavity decon (${property.roof_void_mode === "all_surfaces" ? "all surfaces" : "visibly affected"})`, `${fmt(propertyTotals.decon_m2)} m²`, "#795548")}
-                  {propertyTotals.insBatts > 0 && qline("Insulation removal (batts)", `${fmt(propertyTotals.insBatts)} m²`, "#795548")}
-                  {propertyTotals.insBlown > 0 && qline("Insulation removal (blown-in)", `${fmt(propertyTotals.insBlown)} m²`, "#795548")}
+                  {/* v6.0 — the NETTED figure is what gets priced, so it is what is shown here.
+                      Seeing the raw sum instead would hide the very overlap this de-dups. */}
+                  {insulationTotals.batts_m2 > 0 && qline(`Insulation removal (batts)${insulationTotals.overlap_netted ? " — netted" : ""}`, `${fmt(insulationTotals.batts_m2)} m²`, "#795548")}
+                  {insulationTotals.blown_in_m2 > 0 && qline(`Insulation removal (blown-in)${insulationTotals.overlap_netted ? " — netted" : ""}`, `${fmt(insulationTotals.blown_in_m2)} m²`, "#795548")}
+                  {insulationTotals.cross_type_overlap && (
+                    <div style={{ ...st.qLine, color: "#e86a6a" }}>
+                      <span style={{ ...st.swatch, background: "#e86a6a" }} />
+                      <span style={{ flex: 1 }}>Batts and blown-in OVERLAP ⚠</span>
+                      <span style={st.num}>split unreliable</span>
+                    </div>
+                  )}
                   {propertyTotals.floorProt > 0 && qline("Floor protection", `${fmt(propertyTotals.floorProt)} m²`, "#9E9E9E")}
                   {parseFloat(property.afd_units) > 0 && qline("AFD (air filtration devices)", `${property.afd_units} × ${property.afd_days || 0} days`)}
                   {parseFloat(property.dehum_units) > 0 && qline("Dehumidifiers", `${property.dehum_units} × ${property.dehum_days || 0} days`)}
