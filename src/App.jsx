@@ -18,7 +18,7 @@ const CATS = [
   // void-as-room means). propertyScope is retained as the FALLBACK for shapes not yet inside one:
   // it keeps them out of an ordinary room's scope (where they would silently become that room's
   // quantity) and routes them to the legacy export block plus a hard migration ERROR instead.
-  { id: "roof_void_decon", label: "Roof void / ceiling cavity decontamination", kind: "fill", color: "#795548", propertyScope: true },
+  { id: "roof_void_decon", label: "Roof void decontamination (roof voids only)", kind: "fill", color: "#795548", propertyScope: true },
   { id: "floor_protection", label: "Floor protection",                          kind: "fill", color: "#9E9E9E", propertyScope: true },
 ];
 const catById = (id) => CATS.find((c) => c.id === id);
@@ -50,14 +50,16 @@ const STORAGE_MODES = [
   { value: "onsite",  label: "Onsite" },
   { value: "offsite", label: "Offsite" },
 ];
-// Void-room types (v5.0). EXPLICITLY SELECTED, never inferred — the engine keys off void_type
-// and never off the room name, because names are free text and vary per job. Help text only:
-// a CEILING void sits between an upper and a lower floor; a ROOF void sits between the top
-// floor and the roof. The app does not decide which a floor needs.
+// Void-room types. v6.0 RETIRES ceiling_void (Jordan 7 Aug 2026): a ceiling void between two
+// storeys is scoped with the STRIP-CEILING shape and its insulation option, not as its own
+// room. Only a ROOF void — between the top floor and the roof — is still a room.
+// The engine keys off void_type and NEVER off the room name; names are free text.
 const VOID_TYPES = [
-  { value: "ceiling_void", label: "Ceiling void", hint: "between an upper and a lower floor" },
-  { value: "roof_void",    label: "Roof void",    hint: "between the top floor and the roof" },
+  { value: "roof_void", label: "Roof void", hint: "between the top floor and the roof" },
 ];
+// Retained ONLY so pre-v6.0 saved jobs can still be read and flagged. Never offered as a choice
+// and never written to a new room — existing data is flagged for Jordan, never silently rebound.
+const RETIRED_VOID_TYPES = new Set(["ceiling_void"]);
 const DEFAULT_PROPERTY = {
   // afd_* = Air Filtration Devices (renamed from adf_* in v5.0; the old key is still read on
   // load and still WRITTEN to the export as a deprecated alias so the engine keeps working
@@ -122,7 +124,7 @@ function migrateFloors(d) {
   };
 }
 
-const APP_VERSION = "v5.0";
+const APP_VERSION = "v6.0";
 const BUILD_DATE = typeof __BUILD_DATE__ !== "undefined" ? __BUILD_DATE__ : "";
 
 // ---------- edge snapping (v4.2) ----------
@@ -514,7 +516,10 @@ export default function App() {
     const r = innerRef.current.getBoundingClientRect();
     return { x: (e.clientX - r.left) / zoom, y: (e.clientY - r.top) / zoom };
   };
-  const pushUndo = useCallback(() => setUndoStack((s) => [...s.slice(-49), shapes]), [shapes]);
+  // v6.0 — an undo entry snapshots shapes AND rooms. Deleting a room removes both, so restoring
+  // only the shapes would bring them back pointing at a room id that no longer exists, silently
+  // turning them into orphans — worse than not undoing at all.
+  const pushUndo = useCallback(() => setUndoStack((s) => [...s.slice(-49), { shapes, rooms }]), [shapes, rooms]);
 
   // ---------- pointer handling ----------
   const onPointerDown = (e) => {
@@ -547,12 +552,21 @@ export default function App() {
     }
     if (tool === "draw") {
       const cat = catById(activeCat);
+      // v6.0 item 4 — a roof-void shape binds to a ROOF VOID room, resolved by void_type and
+      // never by room name. If there is none it offers to create one; declining aborts the draw
+      // rather than producing an unassigned shape that becomes an orphan line in the quote.
+      let roomForShape = activeRoom;
+      if (cat.id === "roof_void_decon") {
+        const rv = ensureRoofVoidRoom();
+        if (!rv) return;
+        roomForShape = rv.id;
+      }
       pushUndo();
       const s = cat.kind === "fill"
-        ? { id: nid(), type: "rect", cat: cat.id, room: activeRoom, floorId: activeFloor, x: pt.x, y: pt.y, w: 0, h: 0,
+        ? { id: nid(), type: "rect", cat: cat.id, room: roomForShape, floorId: activeFloor, x: pt.x, y: pt.y, w: 0, h: 0,
             ...(INSULATION_CATS.has(cat.id) ? { insulation: roofInsulation, insulationType: roofInsulationType } : {}),
             ...(cat.id === "cabinetry" ? { cabH: cabHgt === "custom" ? cabHgtCustom : cabHgt } : {}) }
-        : { id: nid(), type: "line", cat: cat.id, room: activeRoom, floorId: activeFloor, x1: pt.x, y1: pt.y, x2: pt.x, y2: pt.y,
+        : { id: nid(), type: "line", cat: cat.id, room: roomForShape, floorId: activeFloor, x1: pt.x, y1: pt.y, x2: pt.x, y2: pt.y,
             ...(cat.id === "wall_strip" ? { hgt: wallHgt, cornice: wallCornice, skirting: wallSkirting, skirtingOnly: wallSkirtingOnly } : {}) };
       setShapes((a) => [...a, s]);
       drag.current = { mode: "new", id: s.id, sx: pt.x, sy: pt.y };
@@ -632,7 +646,13 @@ export default function App() {
         pushUndo(); setShapes((a) => a.filter((s) => s.id !== selId)); setSelId(null);
       }
       if ((e.ctrlKey || e.metaKey) && e.key === "z" && !isTyping(e)) {
-        setUndoStack((u) => { if (!u.length) return u; setShapes(u[u.length - 1]); return u.slice(0, -1); });
+        setUndoStack((u) => {
+          if (!u.length) return u;
+          const prev = u[u.length - 1];
+          setShapes(prev.shapes); setRooms(prev.rooms);
+          setSelId(null);   // the selection may be one of the shapes being restored/removed
+          return u.slice(0, -1);
+        });
       }
     };
     const ku = (e) => { if (e.code === "Space") spaceDown.current = false; };
@@ -1075,7 +1095,8 @@ export default function App() {
       // it does not recognise rather than infer one. String taken verbatim from
       // BML_Markup_App_v5_0_MULTIFLOOR_PLAN.md §5 — note it drops the
       // "(bml-floorplan-quantify-quote)" qualifier that v4.x carried.
-      markup_convention: "BML v5.0 — MULTI-FLOOR; C2 NETTED",
+      markup_convention: "BML v6.0 — MULTI-FLOOR; C2 NETTED; INSULATION DE-DUPLICATED",
+      insulation_model: "v6.0 — INSULATION REMOVAL IS DE-DUPLICATED. Both a strip-ceiling shape and a roof-void shape can carry an insulation-removal flag, and they routinely cover the SAME void from two directions. property.insulation_removal is the AUTHORITATIVE, already-netted figure: the geometric UNION per floor and per type, with near-coincident edges snapped first. PRICE total_m2 / batts_m2 / blown_in_m2 FROM THERE. The per-room insulation_batts_m2 / insulation_blown_m2 on void rooms are the un-netted per-room contributions, kept for audit ONLY — summing them double-charges any overlap. total_m2 is the union of ALL insulation shapes and can never be overstated; where the two TYPES overlap the batts/blown split is unreliable and a hard ERROR flag says so, because the same square metre cannot have both removed. v6.0 also RETIRES ceiling_void as a room type: a ceiling void between storeys is scoped with the strip-ceiling shape and its insulation option, not as its own room. Only roof_void remains, and a roof-void shape is bound to a roof-void room by void_type — never by room name.",
       multifloor_model: "v5.0 — a job has FLOORS. floors[] carries each floor's own calibration; every room carries `floor` (the floor's TYPED label, never invented by the app — it may be \"\" if unlabelled) and `void_type`. PROPERTY SCOPE IS ENTERED ONCE PER JOB and is therefore already a combined total across every floor, including floor_protection_m2 — there is nothing to merge or de-duplicate, and a consumer must NOT attempt to. VOID ROOMS: void_type is `ceiling_void` (between an upper and a lower floor) or `roof_void` (between the top floor and the roof), and is ALWAYS an explicit human selection. Key off void_type ONLY — NEVER off the room name, which is free text: a room named \"understair void\" with void_type null is an ORDINARY room and is flagged, not reinterpreted. A void room carries decon_m2 + insulation_batts_m2 + insulation_blown_m2 + void_decon{} and is otherwise an ordinary room (own ceiling height, containment, strip). property.roof_void is GONE unless a legacy job still has roof-void shapes outside a void room, in which case it is present AND a hard ERROR flag is raised — never silently dropped.",
       condition2_model: "v5.0 — condition2_net_m2 is the PRICED figure and it is ALREADY NETTED. SURFACE: all Condition 2 shapes in a room are UNIONED (with near-coincident edges snapped within ~25 mm first, because shapes drawn by hand to abut are never numerically coincident — measured 12.9 mm and 19.3 mm on real markup — and an un-snapped union keeps the internal wall it exists to remove), then surface = 2 x union_area + union_perimeter x ceiling_height. Floor and ceiling are AREAS (2 x union area); walls are PERIMETER x height. The earlier footprint x (2 + H) form is DEAD: it multiplied the floor AREA by the height to get the wall term, which is only correct in a 4 x 4 m room — it under-read small rooms (1x1: -62%) and over-read large ones (10x10: +49%). NET: surface minus (wall_strip + ceiling_strip + floor_strip), because a stripped surface is already paid for twice (strip rate + cavity remediation) and must not be charged a third time as a Condition 2 clean. A per-shape height override (c2H) puts a shape in its own height group for double-height stairwells and raked ceilings. condition2_m2 is an ALIAS OF THE NET so no consumer can accidentally read the gross; the gross is condition2_surface_m2 (audit only). 'Full strip' no longer exists — floor_strip and ceiling_strip are separate overlays.",
       rooms: roomRows().filter((r) => !r.isUnassigned || r.any).map((r) => ({
@@ -1180,12 +1201,17 @@ export default function App() {
         // void room would mean the app choosing its TYPE, and ceiling-vs-roof is a fact about the
         // building that only Jordan knows. Guessing it would set the wrong decon rate.
         ...(pt.decon_m2 > 0 || pt.insBatts > 0 || pt.insBlown > 0
-          ? [`ERROR — ${round2(pt.decon_m2)} m² of roof/ceiling void decon is NOT inside a void room, so it is still exported under property.roof_void_LEGACY_UNMIGRATED instead of against a floor. Add a void room on the floor it belongs to (+ Add void room, choose Ceiling void or Roof void), then reassign those shapes to it. The app will not create it for you — the void TYPE is a fact about the building, not something it can infer.`]
+          ? [`ERROR — ${round2(pt.decon_m2)} m² of roof-void decon is NOT inside a roof void room, so it is exported under property.roof_void_LEGACY_UNMIGRATED instead of against a floor and will read as an orphan line. On the floor it belongs to, use "+ Add roof void room", then reassign those shapes to it via the room selector. Existing shapes are never silently rebound — only you can say which room and floor they belong to.`]
           : []),
         // v6.0 item 3 — batts and blown-in cannot both come out of the same square metre.
         ...(ins.cross_type_overlap
           ? [`ERROR — insulation shapes of DIFFERENT types (batts vs blown-in) OVERLAP by ${round2(ins.batts_m2 + ins.blown_in_m2 - ins.total_m2)} m². The same area cannot have both removed, so one of them is wrong. total_m2 (${ins.total_m2}) is the union of everything and is safe to price; the batts/blown-in SPLIT is NOT — those two figures sum to more than the total, and they price differently. Fix the markup before relying on the split.`]
           : []),
+        // v6.0 — ceiling_void rooms are RETIRED. Existing ones are flagged, never silently
+        // rebound or deleted: their decon belongs on strip-ceiling shapes now, and only Jordan
+        // can decide how that scope should be redrawn.
+        ...rooms.filter((r) => RETIRED_VOID_TYPES.has(r.void_type))
+          .map((r) => `ERROR — room "${r.name || "(unnamed)"}" is a CEILING VOID, which v6.0 retired. A ceiling void between storeys is now scoped with the strip-ceiling shape and its insulation option, not as its own room. Re-draw that scope and delete this room. Its quantities are still exported — nothing has been silently moved or dropped.`),
         // A void room with no name typed — it would export name:"" and the quote could not
         // identify it. Never auto-named, so it must be flagged.
         ...rooms.filter((r) => r.void_type && !r.name?.trim())
@@ -1465,13 +1491,53 @@ export default function App() {
   };
   // v5.0 void room — created MANUALLY on the active floor with an EXPLICITLY chosen type and a
   // typed name. Nothing here is inferred: the engine keys off void_type, never off the name.
-  const [newVoidType, setNewVoidType] = useState("");
-  const addVoidRoom = () => {
-    const n = newRoom.trim();
-    if (!newVoidType) { alert("Choose Ceiling void or Roof void first — the type is never assumed."); return; }
-    if (!n) { alert("Type a name for the void room first."); return; }
-    const r = { id: nid(), name: n, ch: "2.4", plumbIso: false, elecIso: false, floorId: activeFloor, void_type: newVoidType };
-    setRooms((a) => [...a, r]); setActiveRoom(r.id); setNewRoom(""); setNewVoidType("");
+  // v6.0 — only ROOF voids are rooms now. The name is typed (pre-filled, editable); the type is
+  // no longer a choice because there is only one, so nothing is being guessed.
+  const roofVoidRoomsHere = rooms.filter((r) => r.floorId === activeFloor && r.void_type === "roof_void");
+  const addVoidRoom = (presetName) => {
+    const n = (presetName ?? newRoom).trim();
+    if (!n) { alert("Type a name for the roof void room first."); return; }
+    const r = { id: nid(), name: n, ch: "2.4", plumbIso: false, elecIso: false, floorId: activeFloor, void_type: "roof_void" };
+    setRooms((a) => [...a, r]); setActiveRoom(r.id); if (presetName == null) setNewRoom("");
+    return r;
+  };
+  // v6.0 item 2 — delete a room. A room carrying shapes is NEVER deleted silently: the confirm
+  // states exactly how many shapes and how much area go with it, because losing quantities
+  // without a warning is how a quote ends up under-scoped. Undo-able (pushUndo) and totals
+  // recompute immediately, since a stale total is worse than no total.
+  const deleteRoom = (id) => {
+    const r = rooms.find((x) => x.id === id); if (!r) return;
+    const rs = shapes.filter((s) => s.room === id);
+    let msg = `Delete room "${r.name || "(unnamed)"}"?`;
+    if (rs.length) {
+      const area = rs.reduce((a, s) => a + (s.type === "rect" ? (qtyOf(s) || 0) : 0), 0);
+      const lines = rs.filter((s) => s.type === "line").length;
+      const parts = [`${rs.length} shape${rs.length === 1 ? "" : "s"}`];
+      if (area > 0) parts.push(`${fmt(round2(area))} m²`);
+      if (lines) parts.push(`${lines} line${lines === 1 ? "" : "s"}`);
+      msg = `Delete room "${r.name || "(unnamed)"}" AND ITS MARKUP?\n\nThis destroys ${parts.join(" · ")}.\nThose quantities will disappear from the quote.\n\nCtrl+Z will undo it.`;
+    }
+    if (!window.confirm(msg)) return;
+    pushUndo();
+    setShapes((a) => a.filter((s) => s.room !== id));
+    setRooms((a) => a.filter((x) => x.id !== id));
+    if (activeRoom === id) setActiveRoom(rooms.find((x) => x.id !== id && x.floorId === activeFloor)?.id ?? null);
+    if (selId != null && rs.some((s) => s.id === selId)) setSelId(null);
+    if (roofVoidTarget === id) setRoofVoidTarget(null);
+  };
+
+  // A roof-void shape must never be left unassigned — an unassigned one produces quantities with
+  // no room, which lands in the quote as an orphan line. Binding is by void_type, NEVER by the
+  // room's name: matching on a name is the inference class that v5.0 exists to forbid and flags.
+  const [roofVoidTarget, setRoofVoidTarget] = useState(null);
+  const resolvedRoofVoidRoom = roofVoidRoomsHere.find((r) => r.id === roofVoidTarget) || (roofVoidRoomsHere.length === 1 ? roofVoidRoomsHere[0] : null);
+  const ensureRoofVoidRoom = () => {
+    if (resolvedRoofVoidRoom) return resolvedRoofVoidRoom;
+    if (roofVoidRoomsHere.length > 1) { alert("This floor has more than one roof void room — pick which one these shapes belong to first."); return null; }
+    if (!window.confirm('This floor has no roof void room, and a roof-void shape cannot be left unassigned.\n\nCreate a room "Roof Void" on this floor now? (You can rename it afterwards.)')) return null;
+    const r = addVoidRoom("Roof Void");
+    if (r) setRoofVoidTarget(r.id);
+    return r;
   };
 
   const sel = shapes.find((s) => s.id === selId);
@@ -1659,17 +1725,15 @@ export default function App() {
                   onChange={(e) => setNewRoom(e.target.value)} onKeyDown={(e) => e.key === "Enter" && addRoom()} />
                 <button style={btn(false)} onClick={addRoom}>Add</button>
               </div>
-              {/* v5.0 void room — type is chosen EXPLICITLY, name is typed. Nothing inferred. */}
+              {/* v6.0 — only ROOF voids are rooms. A ceiling void between storeys is scoped with
+                  the strip-ceiling shape and its insulation option, not as a room. */}
               <div style={st.row}>
-                <select style={{ ...st.selectEl, flex: 1 }} value={newVoidType} onChange={(e) => setNewVoidType(e.target.value)}>
-                  <option value="">— void type —</option>
-                  {VOID_TYPES.map((v) => <option key={v.value} value={v.value}>{v.label}</option>)}
-                </select>
-                <button style={btn(false)} onClick={addVoidRoom} title="Creates a void room on this floor using the name typed above">+ Add void room</button>
+                <button style={{ ...btn(false), flex: 1 }} onClick={() => addVoidRoom()}
+                  title="Creates a roof void room on this floor using the name typed above">+ Add roof void room</button>
               </div>
               <div style={{ ...st.meta, fontSize: 10.5 }}>
-                Ceiling void = between an upper and a lower floor · Roof void = between the top floor and the roof.
-                Type the name above, pick the type, then Add.
+                Roof void = between the top floor and the roof. A ceiling void between storeys is NOT a roof void —
+                scope that with the strip-ceiling shape and its insulation option.
               </div>
               {rooms.filter((r) => (r.floorId ?? activeFloor) === activeFloor).map((r) => (
                 <div key={r.id} style={{ ...st.roomRow, outline: activeRoom === r.id ? "1px solid #6ea8fe" : "none", opacity: hiddenRooms.has(r.id) ? 0.55 : 1 }}
@@ -1698,6 +1762,8 @@ export default function App() {
                   </label>
                   <span title="Toggle this room's shapes on canvas" style={{ cursor: "pointer", opacity: hiddenRooms.has(r.id) ? 1 : 0.5 }}
                     onClick={(e) => { e.stopPropagation(); toggleHiddenRoom(r.id); }}>👁</span>
+                  <span title="Delete this room" style={{ cursor: "pointer", opacity: 0.6 }}
+                    onClick={(e) => { e.stopPropagation(); deleteRoom(r.id); }}>✕</span>
                 </div>
               ))}
               <div style={st.meta}>Active room is tagged onto every new shape.</div>
@@ -1738,6 +1804,29 @@ export default function App() {
                   <label style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 11.5 }}>
                     <input type="checkbox" checked={wallSkirtingOnly} onChange={(e) => setWallSkirtingOnly(e.target.checked)} /> Skirting only (no wall lining)
                   </label>
+                </div>
+              )}
+              {/* v6.0 — which roof void room new roof-void shapes bind to. Only needed when the
+                  floor has more than one; with exactly one it binds automatically, with none the
+                  draw offers to create it. */}
+              {activeCat === "roof_void_decon" && (
+                <div style={st.selBox}>
+                  {roofVoidRoomsHere.length > 1 ? (
+                    <div style={st.row}>
+                      <span style={st.meta}>Roof void room:</span>
+                      <select style={{ ...st.selectEl, flex: 1 }} value={resolvedRoofVoidRoom?.id ?? ""}
+                        onChange={(e) => setRoofVoidTarget(e.target.value ? Number(e.target.value) : null)}>
+                        <option value="">— pick which —</option>
+                        {roofVoidRoomsHere.map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
+                      </select>
+                    </div>
+                  ) : (
+                    <div style={{ ...st.meta, fontSize: 11 }}>
+                      {roofVoidRoomsHere.length === 1
+                        ? <>Binds to roof void room <strong>{roofVoidRoomsHere[0].name}</strong>.</>
+                        : <span style={{ color: "#e8b34b" }}>No roof void room on this floor — drawing will offer to create one.</span>}
+                    </div>
+                  )}
                 </div>
               )}
               {INSULATION_CATS.has(activeCat) && (
