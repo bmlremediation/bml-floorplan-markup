@@ -1384,7 +1384,9 @@ export default function App() {
   const exportProject = () => {
     const filename = `${(jobName || "job").replace(/\s+/g, "_")}_markup_PROJECT.json`;
     const data = {
-      format: "bml-markup-project", version: 5, image_embedded: false,
+      // v6 adds insulation/insulationType on ceiling_strip shapes and retires ceiling_void.
+      // Import accepts any version (it keys off `format`), so v2-v5 files still load.
+      format: "bml-markup-project", version: 6, image_embedded: false,
       savedAt: new Date().toISOString(),
       imgW: img?.w || 0, imgH: img?.h || 0,
       // v5.0: floors[] plus floorId-tagged rooms/shapes. calLine/scale are still written as a
