@@ -771,6 +771,11 @@ export default function App() {
       const rowScale = (room ? scaleOfFloor(room.floorId) : (rs.length ? scaleOf(rs[0]) : null)) || 0;
       const row = {
         name: room ? room.name : "Unassigned", ch: room ? chOf(room) : 2.4, isUnassigned: !room,
+        // v6.0 — chOf() silently defaults a blank/unparseable ceiling height to 2.4, so `ch` is
+        // ALWAYS truthy and the D1.6 "C2 drawn with no ceiling height" check could never fire.
+        // It had been dead since v4.0. Track whether a height was actually SET, separately from
+        // the value used for the maths, so that validation works as intended.
+        chSet: room ? (parseFloat(room.ch) > 0) : true,
         plumbIso: room ? !!room.plumbIso : false, elecIso: room ? !!room.elecIso : false,
         counts: {}, wallLinm: 0, corniceLinm: 0, skirtingLinm: 0, any: rs.length > 0,
         floorId: room ? room.floorId : null,
@@ -1181,62 +1186,100 @@ export default function App() {
         },
       },
       flags: [
-        ...(shapes.some((s) => s.room == null && !catById(s.cat)?.propertyScope) ? ["UNASSIGNED shapes present — reassign before pricing"] : []),
+        ...(shapes.some((s) => s.room == null && !catById(s.cat)?.propertyScope)
+          ? [mkFlag("UNASSIGNED_SHAPES", "ERROR", "UNASSIGNED shapes present — reassign before pricing")] : []),
         // Job-wide "nothing is calibrated at all". Per-floor gaps are reported separately below,
         // so adding an uncalibrated second floor never invalidates a calibrated first one.
-        ...(!floors.some((f) => f.scale) ? ["NOT CALIBRATED — quantities invalid"] : []),
+        ...(!floors.some((f) => f.scale)
+          ? [mkFlag("NOT_CALIBRATED", "ERROR", "NOT CALIBRATED — quantities invalid")] : []),
         // v5.0 per-floor guards. Only emit once a job genuinely has more than one floor, so a
         // single-floor v4.x job still exports byte-identically to v4.2.
         ...(floors.length > 1
           ? floors.filter((f) => !f.scale && shapes.some((s) => s.floorId === f.id))
-              .map((f) => `ERROR — floor "${f.name || f.id}" has markup but NO CALIBRATION. Its quantities are invalid; calibrate that floor's plan.`)
+              .map((f) => mkFlag("FLOOR_NOT_CALIBRATED", "ERROR",
+                `ERROR — floor "${f.name || f.id}" has markup but NO CALIBRATION. Its quantities are invalid; calibrate that floor's plan.`,
+                { floor: f.name || "" }))
           : []),
         // A floor carrying markup but never labelled — rooms would export floor:"" and the quote
         // could not say which storey they are on. Never auto-named, so it must be flagged.
         ...(floors.length > 1
           ? floors.filter((f) => !f.name?.trim() && (rooms.some((r) => r.floorId === f.id) || shapes.some((s) => s.floorId === f.id)))
-              .map(() => `ERROR — a floor has markup but NO LABEL. Type its label (e.g. G / L1 / L2) — the app never names a floor for you.`)
+              .map(() => mkFlag("FLOOR_NOT_LABELLED", "ERROR",
+                `ERROR — a floor has markup but NO LABEL. Type its label (e.g. G / L1 / L2) — the app never names a floor for you.`,
+                { floor: "" }))
           : []),
         // v5.0 — legacy roof-void shapes still outside a void room. NOT auto-migrated: creating a
         // void room would mean the app choosing its TYPE, and ceiling-vs-roof is a fact about the
         // building that only Jordan knows. Guessing it would set the wrong decon rate.
         ...(pt.decon_m2 > 0 || pt.insBatts > 0 || pt.insBlown > 0
-          ? [`ERROR — ${round2(pt.decon_m2)} m² of roof-void decon is NOT inside a roof void room, so it is exported under property.roof_void_LEGACY_UNMIGRATED instead of against a floor and will read as an orphan line. On the floor it belongs to, use "+ Add roof void room", then reassign those shapes to it via the room selector. Existing shapes are never silently rebound — only you can say which room and floor they belong to.`]
+          ? [mkFlag("ROOF_VOID_UNMIGRATED", "ERROR",
+              `ERROR — ${round2(pt.decon_m2)} m² of roof-void decon is NOT inside a roof void room, so it is exported under property.roof_void_LEGACY_UNMIGRATED instead of against a floor and will read as an orphan line. On the floor it belongs to, use "+ Add roof void room", then reassign those shapes to it via the room selector. Existing shapes are never silently rebound — only you can say which room and floor they belong to.`)]
           : []),
         // v6.0 item 3 — batts and blown-in cannot both come out of the same square metre.
         ...(ins.cross_type_overlap
-          ? [`ERROR — insulation shapes of DIFFERENT types (batts vs blown-in) OVERLAP by ${round2(ins.batts_m2 + ins.blown_in_m2 - ins.total_m2)} m². The same area cannot have both removed, so one of them is wrong. total_m2 (${ins.total_m2}) is the union of everything and is safe to price; the batts/blown-in SPLIT is NOT — those two figures sum to more than the total, and they price differently. Fix the markup before relying on the split.`]
+          ? [mkFlag("INSULATION_CROSS_TYPE_OVERLAP", "ERROR",
+              `ERROR — insulation shapes of DIFFERENT types (batts vs blown-in) OVERLAP by ${round2(ins.batts_m2 + ins.blown_in_m2 - ins.total_m2)} m². The same area cannot have both removed, so one of them is wrong. total_m2 (${ins.total_m2}) is the union of everything and is safe to price; the batts/blown-in SPLIT is NOT — those two figures sum to more than the total, and they price differently. Fix the markup before relying on the split.`)]
           : []),
         // v6.0 — ceiling_void rooms are RETIRED. Existing ones are flagged, never silently
         // rebound or deleted: their decon belongs on strip-ceiling shapes now, and only Jordan
         // can decide how that scope should be redrawn.
         ...rooms.filter((r) => RETIRED_VOID_TYPES.has(r.void_type))
-          .map((r) => `ERROR — room "${r.name || "(unnamed)"}" is a CEILING VOID, which v6.0 retired. A ceiling void between storeys is now scoped with the strip-ceiling shape and its insulation option, not as its own room. Re-draw that scope and delete this room. Its quantities are still exported — nothing has been silently moved or dropped.`),
+          .map((r) => mkFlag("CEILING_VOID_RETIRED", "ERROR",
+            `ERROR — room "${r.name || "(unnamed)"}" is a CEILING VOID, which v6.0 retired. A ceiling void between storeys is now scoped with the strip-ceiling shape and its insulation option, not as its own room. Re-draw that scope and delete this room. Its quantities are still exported — nothing has been silently moved or dropped.`,
+            { room: r.name || "", floor: floors.find((f) => f.id === r.floorId)?.name || "" })),
         // A void room with no name typed — it would export name:"" and the quote could not
         // identify it. Never auto-named, so it must be flagged.
         ...rooms.filter((r) => r.void_type && !r.name?.trim())
-          .map((r) => `ERROR — a ${r.void_type === "roof_void" ? "roof" : "ceiling"} void room has NO NAME. Type one — the app never names a room for you.`),
+          .map((r) => mkFlag("VOID_ROOM_NOT_NAMED", "ERROR",
+            `ERROR — a ${r.void_type === "roof_void" ? "roof" : "ceiling"} void room has NO NAME. Type one — the app never names a room for you.`,
+            { room: "", floor: floors.find((f) => f.id === r.floorId)?.name || "" })),
         // A room NAMED like a void but with no void_type is an ordinary room. Flag it rather than
         // reinterpret it — inferring scope from a room name is the BMLJ00685 A6 defect class.
         ...rooms.filter((r) => !r.void_type && /\bvoid\b/i.test(r.name || ""))
-          .map((r) => `FLAG — "${r.name}" is named like a void but has NO void_type, so it prices as an ORDINARY room. If it is a void, delete it and re-add it with + Add void room. The engine never infers a void from a name.`),
+          .map((r) => mkFlag("ROOM_NAMED_VOID_NO_TYPE", "FLAG",
+            `FLAG — "${r.name}" is named like a void but has NO void_type, so it prices as an ORDINARY room. If it is a void, delete it and re-add it with + Add void room. The engine never infers a void from a name.`,
+            { room: r.name, floor: floors.find((f) => f.id === r.floorId)?.name || "" })),
         ...roomRows().filter((r) => r.voidType && r.counts.roof_void_decon > 0 && property.roof_void_mode === "none")
-          .map((r) => `FLAG — void room "${r.name}" has ${round2(r.counts.roof_void_decon)} m² drawn but Roof void decon is set to "None". The area is exported, NOT zeroed — reconcile before pricing.`),
+          .map((r) => mkFlag("VOID_DECON_MODE_NONE", "FLAG",
+            `FLAG — void room "${r.name}" has ${round2(r.counts.roof_void_decon)} m² drawn but Roof void decon is set to "None". The area is exported, NOT zeroed — reconcile before pricing.`,
+            { room: r.name, floor: floors.find((f) => f.id === r.floorId)?.name || "" })),
         ...roomRows().filter((r) => r.floorMismatch)
-          .map((r) => `ERROR — ${r.name}: contains shapes drawn on a different floor to the room itself. Those shapes' coordinates and scale disagree — reassign them, do not price this room.`),
+          .map((r) => mkFlag("ROOM_FLOOR_MISMATCH", "ERROR",
+            `ERROR — ${r.name}: contains shapes drawn on a different floor to the room itself. Those shapes' coordinates and scale disagree — reassign them, do not price this room.`,
+            { room: r.name, floor: floors.find((f) => f.id === r.floorId)?.name || "" })),
         // ---- v4.0 D1.6 hard-error validations. A quantity that is not physically plausible must
         // never leave the app silently: every one of these passed every downstream gate before.
         ...roomRows().filter((r) => r.any && r.c2 && r.c2.shapes.length && r.c2.net_m2 <= 0)
-          .map((r) => `ERROR — ${r.name}: Condition 2 NET is ${r.c2.net_m2} m² (<= 0). Stripped area (${round2((r.counts.wall_strip||0)+(r.counts.ceiling_strip||0)+(r.counts.floor_strip||0))} m²) meets or exceeds the computed C2 surface (${r.c2.surface_m2} m²). This is the double-height / stairwell signature — set a per-shape height override (c2H) or supply a manual C2 total. DO NOT PRICE THIS AS ZERO.`),
+          .map((r) => mkFlag("C2_NET_NOT_POSITIVE", "ERROR",
+            `ERROR — ${r.name}: Condition 2 NET is ${r.c2.net_m2} m² (<= 0). Stripped area (${round2((r.counts.wall_strip||0)+(r.counts.ceiling_strip||0)+(r.counts.floor_strip||0))} m²) meets or exceeds the computed C2 surface (${r.c2.surface_m2} m²). This is the double-height / stairwell signature — set a per-shape height override (c2H) or supply a manual C2 total. DO NOT PRICE THIS AS ZERO.`,
+            { room: r.name, floor: floors.find((f) => f.id === r.floorId)?.name || "" })),
         ...roomRows().filter((r) => r.any && r.c2 && r.c2.shapes.length && r.c2.surface_m2 > 6 * ((r.counts.wall_strip||0)+(r.counts.ceiling_strip||0)+(r.counts.floor_strip||0)) && ((r.counts.wall_strip||0)+(r.counts.ceiling_strip||0)+(r.counts.floor_strip||0)) > 0)
-          .map((r) => `FLAG — ${r.name}: C2 surface ${r.c2.surface_m2} m² exceeds 6x the stripped area — possible whole-room over-read.`),
-        ...roomRows().filter((r) => r.any && r.c2 && r.c2.shapes.length && !r.ch)
-          .map((r) => `ERROR — ${r.name}: Condition 2 zone drawn with NO ceiling height set.`),
+          .map((r) => mkFlag("C2_SURFACE_OVER_STRIPPED", "FLAG",
+            `FLAG — ${r.name}: C2 surface ${r.c2.surface_m2} m² exceeds 6x the stripped area — possible whole-room over-read.`,
+            { room: r.name, floor: floors.find((f) => f.id === r.floorId)?.name || "" })),
+        ...roomRows().filter((r) => r.any && r.c2 && r.c2.shapes.length && !r.chSet)
+          .map((r) => mkFlag("C2_NO_CEILING_HEIGHT", "ERROR",
+            `ERROR — ${r.name}: Condition 2 zone drawn with NO ceiling height set. The surface has been computed at the 2.4 m default — set the real height or confirm 2.4 is correct.`,
+            { room: r.name, floor: floors.find((f) => f.id === r.floorId)?.name || "" })),
         ...roomRows().filter((r) => r.cabMissingH)
-          .map((r) => `ERROR — ${r.name}: cabinetry drawn with NO height selected. Cabinetry prices on FACE area (perimeter x height) — a footprint cannot be priced.`),
+          .map((r) => mkFlag("CABINETRY_NO_HEIGHT", "ERROR",
+            `ERROR — ${r.name}: cabinetry drawn with NO height selected. Cabinetry prices on FACE area (perimeter x height) — a footprint cannot be priced.`,
+            { room: r.name, floor: floors.find((f) => f.id === r.floorId)?.name || "" })),
       ],
     };
   };
+
+  // v6.0 item 4 — STRUCTURED FLAGS.
+  // `code` is the stable machine key: assert on it, NEVER on `message`. Message prose gets
+  // reworded (three were reworded during the v6.0 build alone, one of them in the same session
+  // that introduced it), and an assertion keyed to prose breaks on a change that looks purely
+  // cosmetic from the app side.
+  // `severity` uses the app's own long-standing vocabulary, matching the message prefixes:
+  //   "ERROR" — do not price this; something is wrong or missing.
+  //   "FLAG"  — price it, but a human should look first.
+  // `room` / `floor` are present where the flag is attributable to one. `floor` is the floor's
+  // TYPED label, so it is "" precisely when FLOOR_NOT_LABELLED fires — use floors[] order there.
+  const mkFlag = (code, severity, message, extra) => ({ code, severity, message, ...(extra || {}) });
 
   const downloadFile = (filename, text) => {
     const blob = new Blob([text], { type: "application/json" });
