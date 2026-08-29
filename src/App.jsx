@@ -1,5 +1,12 @@
 import React, { useState, useRef, useEffect, useCallback } from "react";
 import { listJobs, getJob, putJob, deleteJob as dbDeleteJob, getImageBlob, putImageBlob, deleteImageBlob, imageKeyFor, dataURLToBlob, blobToDataURL } from "./db.js";
+// v7.0 item 8 — equipment marker icons (CO 2026-08-27, supplied in _Artifact and HTML App
+// Masters/assets/, downscaled to 96px before bundling).
+import iconSplitAcInsitu from "./assets/icon_split_ac_decon_insitu.png";
+import iconSplitAcDecomm from "./assets/icon_split_ac_decommission.png";
+import iconAfd from "./assets/icon_afd.png";
+import iconDehum from "./assets/icon_dehumidifier.png";
+import iconDrymatic from "./assets/icon_drymatic_boost.png";
 
 // ---------- BML markup convention (v3.2 — mirrors bml-floorplan-quantify-quote) ----------
 // "Full strip" removed (v3.1): floor_strip + ceiling_strip drawn separately instead.
@@ -61,23 +68,31 @@ const VOID_TYPES = [
 // and never written to a new room — existing data is flagged for Jordan, never silently rebound.
 const RETIRED_VOID_TYPES = new Set(["ceiling_void"]);
 const DEFAULT_PROPERTY = {
-  // afd_* = Air Filtration Devices (renamed from adf_* in v5.0; the old key is still read on
-  // load and still WRITTEN to the export as a deprecated alias so the engine keeps working
-  // through the phase-6 sweep).
-  afd_units: "", afd_days: "", dehum_units: "", dehum_days: "", dbkii_days: "",
-  drymatic_units: "", drymatic_days: "", drying_mat_units: "", drying_mat_days: "",
+  // v7.0 (CO 2026-08-27 item 8): the equipment UNIT-COUNT inputs (afd_units, dehum_units,
+  // drymatic_units, ac_split_units) are GONE — counts now come from placed markers. The ×days
+  // inputs stay (duration is job-level). drying_mat_units/days -> drying_mats_m2 (item 4:
+  // drying mats price per m², not per unit — so there is no days field for mats either).
+  afd_days: "", dehum_days: "", dbkii_days: "",
+  drymatic_days: "", drying_mats_m2: "",
   air_mover_units: "", air_mover_days: "",
-  ac_ducted_units: "", ac_split_units: "", ac_duct_removal_rooms: "", prv_areas: "",
+  ac_ducted_units: "", ac_duct_removal_rooms: "", prv_areas: "",
   contents_packout: false, contents_inventory: false, skip_bin: false, asbestos_testing: false,
   contents_storage: "none", roof_void_mode: "all_surfaces",
 };
-// v4.x records stored adf_units/adf_days. Fold them into the new keys on load/import so no
-// saved job silently loses its air-filtration figures.
+// Legacy property keys carried invisibly so an old job NEVER silently loses a quantity on
+// re-export. Unit counts cannot be converted to markers (no positions) and drying-mat UNITS
+// cannot be converted to m² — so they ride along, export under equipment.legacy_* with a loud
+// flag, and disappear only when Jordan places the markers / enters the m² himself.
+const LEGACY_EQUIP_KEYS = ["afd_units", "dehum_units", "drymatic_units", "ac_split_units", "drying_mat_units", "drying_mat_days"];
 function migrateProperty(p) {
-  const out = { ...DEFAULT_PROPERTY, ...(p || {}) };
-  if (out.afd_units === "" && p?.adf_units != null && p.adf_units !== "") out.afd_units = p.adf_units;
+  const out = { ...DEFAULT_PROPERTY };
+  for (const k of Object.keys(DEFAULT_PROPERTY)) if (p && p[k] != null) out[k] = p[k];
+  // v4.x adf_* -> afd_* (days only now; the unit count folds into the legacy ride-along)
   if (out.afd_days === "" && p?.adf_days != null && p.adf_days !== "") out.afd_days = p.adf_days;
-  delete out.adf_units; delete out.adf_days;
+  for (const k of LEGACY_EQUIP_KEYS) {
+    const v = p?.[k] ?? (k === "afd_units" ? p?.adf_units : undefined);
+    if (v != null && v !== "" && parseFloat(v) > 0) out[`legacy_${k}`] = v;
+  }
   return out;
 }
 // Cabinetry face-height presets (D1.4, Jordan ruling 26 Jul 2026 — perimeter × height).
@@ -87,6 +102,38 @@ const CAB_HEIGHTS = [
   { value: "2.1", label: "Tall 2.1 m" },
   { value: "2.4", label: "Full 2.4 m" },
 ];
+
+// ---------- v7.0 item 1 (CO 2026-08-27) — floor covering on floor-strip shapes ----------
+// Every floor-strip shape carries the SPECIFIC covering (floorCov, the `value` below); the
+// export maps it to the 3-class enum quantify_quote.py already consumes UNCHANGED via `cls`.
+// "carpet/lino — direct stuck" maps to carpet_direct_stuck (the CO's "hard" parenthetical also
+// mentions lino-direct-stuck — resolved in favour of the detail option's own mapping; logged).
+// "" = not yet selected -> FLOOR_COVERING_NOT_SET flag (kills the standing quantify CONFIRM
+// only when a value is actually chosen, never by defaulting).
+const FLOOR_COVERINGS = [
+  { value: "carpet_underlay",     label: "Carpet — underlay & smooth edge", cls: "carpet" },
+  { value: "carpet_direct_stuck", label: "Carpet/lino — direct stuck",      cls: "carpet_direct_stuck" },
+  { value: "tiles",               label: "Tiles",                            cls: "hard" },
+  { value: "floorboards",         label: "Floorboards",                      cls: "hard" },
+  { value: "other",               label: "Other",                            cls: "hard" },
+];
+const floorCovById = (v) => FLOOR_COVERINGS.find((c) => c.value === v);
+
+// ---------- v7.0 item 8 (CO 2026-08-27) — equipment as per-room draggable markers ----------
+// Point markers placed on the plan (fixed SCREEN size, not drawn shapes), room-assigned and
+// floor-tagged exactly like shapes. They replace the property-level UNIT-COUNT boxes; the
+// property-level ×days inputs are KEPT (equipment duration is job-level — CO silent, logged).
+// exportKey is the per-room field name AND the property-level total name; legacyAlias keeps the
+// old property key alive as a derived total so pre-update consumers keep reading a number.
+const MARKER_KINDS = [
+  { id: "split_ac_decon_insitu", label: "Split AC decon (in-situ)",          icon: iconSplitAcInsitu, exportKey: "split_ac_decon_insitu_count", legacyAlias: "ac_split_units" },
+  { id: "split_ac_decommission", label: "Split AC decommission + decon",     icon: iconSplitAcDecomm, exportKey: "split_ac_decommission_count" },
+  { id: "afd",                   label: "AFD (air filtration device)",       icon: iconAfd,           exportKey: "afd_count",                   legacyAlias: "afd_units" },
+  { id: "dehumidifier",          label: "Dehumidifier",                      icon: iconDehum,         exportKey: "dehumidifier_count",          legacyAlias: "dehum_units" },
+  { id: "drymatic_boost",        label: "Drymatic boost",                    icon: iconDrymatic,      exportKey: "drymatic_boost_count",        legacyAlias: "drymatic_units", hasHeatMats: true },
+];
+const markerKindById = (id) => MARKER_KINDS.find((k) => k.id === id);
+const MARKER_SCREEN_PX = 26;   // rendered size in SCREEN pixels — constant regardless of zoom
 
 // ---------- v5.0 multi-floor data model (phase 1) ----------
 // FLAT ARRAYS WITH A FLOOR TAG, never nested floors. rooms[] and shapes[] stay single flat
@@ -112,6 +159,7 @@ function migrateFloors(d) {
       floors,
       rooms: (d.rooms || []).map((r) => ({ ...r, floorId: r.floorId ?? fb })),
       shapes: (d.shapes || []).map((s) => ({ ...s, floorId: s.floorId ?? fb })),
+      markers: (d.markers || []).map((m) => ({ ...m, floorId: m.floorId ?? fb })),   // v7.0 — pre-v7 records have none
     };
   }
   // v4.x flat record -> one implicit floor carrying that job's calibration + image size.
@@ -121,10 +169,11 @@ function migrateFloors(d) {
     floors: [f],
     rooms: (d.rooms || []).map((r) => ({ ...r, floorId: FIRST_FLOOR_ID })),
     shapes: (d.shapes || []).map((s) => ({ ...s, floorId: FIRST_FLOOR_ID })),
+    markers: (d.markers || []).map((m) => ({ ...m, floorId: FIRST_FLOOR_ID })),
   };
 }
 
-const APP_VERSION = "v6.0";
+const APP_VERSION = "v7.0";
 const BUILD_DATE = typeof __BUILD_DATE__ !== "undefined" ? __BUILD_DATE__ : "";
 
 // ---------- edge snapping (v4.2) ----------
@@ -236,10 +285,19 @@ export default function App() {
   const [roofInsulationType, setRoofInsulationType] = useState("batts");
   const [cabHgt, setCabHgt] = useState("");        // default cabH for NEW cabinetry shapes: "" | "0.9" | "2.1" | "2.4" | "custom"
   const [cabHgtCustom, setCabHgtCustom] = useState("");
+  const [floorCov, setFloorCov] = useState("");    // v7.0 — default covering for NEW floor-strip shapes ("" = not chosen)
   // shapes
   const [shapes, setShapes] = useState([]);
   const [selId, setSelId] = useState(null);
   const [undoStack, setUndoStack] = useState([]);
+  // v7.0 — equipment markers: {id, kind, room, floorId, x, y, heatMatsM2?}. Flat + floor-tagged
+  // exactly like shapes. selMarkerId is a SEPARATE selection channel from selId so shape and
+  // marker selection can never point at each other's ids.
+  const [markers, setMarkers] = useState([]);
+  const [selMarkerId, setSelMarkerId] = useState(null);
+  const [activeMarkerKind, setActiveMarkerKind] = useState(MARKER_KINDS[0].id);
+  // v7.0 item 6 — instructions modal: shown once per NEW job, acknowledged explicitly.
+  const [instructionsOpen, setInstructionsOpen] = useState(false);
   // floors (v5.0) — calibration and plan image are PER FLOOR; plans are routinely at
   // different scales, so a job-wide scale would be silently wrong on every floor but one.
   const [floors, setFloors] = useState(() => [newFloor(FIRST_FLOOR_ID)]);
@@ -253,8 +311,9 @@ export default function App() {
   // visibility toggles (cosmetic only — canvas display, never affects quantities/export)
   const [hiddenCats, setHiddenCats] = useState(() => new Set());
   const [hiddenRooms, setHiddenRooms] = useState(() => new Set());
-  // collapsible panel sections (not persisted)
-  const [collapsed, setCollapsed] = useState({});
+  // collapsible panel sections (not persisted). Instructions starts COLLAPSED (v7.0 item 6):
+  // the text lives in the first-open modal + this section, not permanently on screen.
+  const [collapsed, setCollapsed] = useState({ instructions: true });
   // export / import modals (copy/paste kept for Cowork paste-in convenience)
   const [exportModal, setExportModal] = useState(null); // {title, hint, text, filename}
   const [importOpen, setImportOpen] = useState(false);
@@ -301,12 +360,14 @@ export default function App() {
     const id = String(Date.now());
     setJobId(id); setJobName(""); setRooms([]); setActiveRoom(null);
     setShapes([]); setSelId(null); setUndoStack([]);
+    setMarkers([]); setSelMarkerId(null);
     setFloors([newFloor(FIRST_FLOOR_ID)]); setActiveFloor(FIRST_FLOOR_ID);
     setImg(null); idRef.current = 1; loadedRef.current = true;
     pendingRescale.current = null;
     setProperty(DEFAULT_PROPERTY);
     setHiddenCats(new Set()); setHiddenRooms(new Set());
     setSaveState("idle"); setView("editor");
+    setInstructionsOpen(true);   // v7.0 item 6 — once per NEW job, dismissed with the acknowledge button
   };
 
   const openJob = async (id) => {
@@ -328,11 +389,12 @@ export default function App() {
     setJobId(id); setJobName(meta.name || ""); setRooms(mig.rooms);
     setActiveRoom(mig.rooms.find((r) => r.floorId === af)?.id ?? null);
     setShapes(mig.shapes); setFloors(mig.floors); setActiveFloor(af);
+    setMarkers(mig.markers); setSelMarkerId(null);
     setSelId(null); setUndoStack([]);
     setProperty(migrateProperty(meta.property));
     setHiddenCats(new Set()); setHiddenRooms(new Set());
     pendingRescale.current = null;
-    idRef.current = Math.max(1, ...(meta.shapes || []).map((s) => s.id + 1), ...(meta.rooms || []).map((r) => r.id + 1));
+    idRef.current = Math.max(1, ...(meta.shapes || []).map((s) => s.id + 1), ...(meta.rooms || []).map((r) => r.id + 1), ...(meta.markers || []).map((m) => m.id + 1));
     if (src && afRec?.imgW) {
       setImg({ src, w: afRec.imgW, h: afRec.imgH });
       requestAnimationFrame(() => fitView(afRec.imgW, afRec.imgH));
@@ -348,7 +410,7 @@ export default function App() {
   const switchFloor = async (fid) => {
     if (fid === activeFloor) return;
     const f = floors.find((x) => x.id === fid); if (!f) return;
-    setSelId(null); setMeasure(null); setTool("select");
+    setSelId(null); setSelMarkerId(null); setMeasure(null); setTool("select");
     setActiveFloor(fid);
     setActiveRoom(rooms.find((r) => r.floorId === fid)?.id ?? null);
     if (!f.imgW) { setImg(null); return; }
@@ -382,6 +444,7 @@ export default function App() {
     const remaining = floors.filter((x) => x.id !== fid);
     setRooms((a) => a.filter((r) => r.floorId !== fid));
     setShapes((a) => a.filter((s) => s.floorId !== fid));
+    setMarkers((a) => a.filter((m) => m.floorId !== fid));
     setFloors(remaining);
     if (jobId) { try { await deleteImageBlob(imageKeyFor(jobId, fid, FIRST_FLOOR_ID)); } catch {} }
     if (activeFloor === fid) await switchFloor(remaining[0].id);
@@ -402,7 +465,7 @@ export default function App() {
       // keep the active floor's stored image size in step with what's on screen
       const outFloors = floors.map((f) => f.id === activeFloor ? { ...f, imgW: w, imgH: h } : f);
       const meta = {
-        id: jobId, name: jobName, rooms, shapes, property,
+        id: jobId, name: jobName, rooms, shapes, markers, property,
         floors: outFloors, activeFloor,
         // Legacy v4.x mirror — keeps this record readable by the live v4.2 app. Mirrors the
         // FIRST floor only, so once a job genuinely has multiple floors this is a lossy
@@ -416,7 +479,7 @@ export default function App() {
       setIndex((prev) => [entry, ...prev.filter((j) => j.id !== jobId)]);
       setSaveState("saved");
     } catch { setSaveState("error"); }
-  }, [storageOk, jobId, jobName, rooms, shapes, floors, activeFloor, property, img]);
+  }, [storageOk, jobId, jobName, rooms, shapes, markers, floors, activeFloor, property, img]);
 
   // autosave (debounced) on any markup change
   useEffect(() => {
@@ -425,7 +488,7 @@ export default function App() {
     clearTimeout(saveTimer.current);
     saveTimer.current = setTimeout(() => persistMeta(), 1200);
     return () => clearTimeout(saveTimer.current);
-  }, [shapes, rooms, jobName, floors, property]); // eslint-disable-line
+  }, [shapes, rooms, markers, jobName, floors, property]); // eslint-disable-line
 
   // ---------- image input (compress -> persist as Blob) ----------
   const loadImageFile = (file) => {
@@ -519,7 +582,7 @@ export default function App() {
   // v6.0 — an undo entry snapshots shapes AND rooms. Deleting a room removes both, so restoring
   // only the shapes would bring them back pointing at a room id that no longer exists, silently
   // turning them into orphans — worse than not undoing at all.
-  const pushUndo = useCallback(() => setUndoStack((s) => [...s.slice(-49), { shapes, rooms }]), [shapes, rooms]);
+  const pushUndo = useCallback(() => setUndoStack((s) => [...s.slice(-49), { shapes, rooms, markers }]), [shapes, rooms, markers]);
 
   // ---------- pointer handling ----------
   const onPointerDown = (e) => {
@@ -530,6 +593,16 @@ export default function App() {
     }
     const pt = toImg(e);
     if (tool === "select") {
+      // v7.0 — markers are small and sit on top of everything, so they get first refusal on a
+      // click. A marker hit selects/moves the marker; shape cycling is untouched underneath.
+      const mHit = [...markers].reverse().find((m) => (m.floorId ?? activeFloor) === activeFloor && hitMarker(m, pt));
+      if (mHit) {
+        setSelMarkerId(mHit.id); setSelId(null);
+        pushUndo();
+        drag.current = { mode: "marker-move", id: mHit.id, sx: pt.x, sy: pt.y, orig: { ...mHit } };
+        return;
+      }
+      setSelMarkerId(null);
       const sel = shapes.find((s) => s.id === selId);
       if (sel) {
         const h = hitHandle(sel, pt);
@@ -572,6 +645,19 @@ export default function App() {
       drag.current = { mode: "new", id: s.id, sx: pt.x, sy: pt.y };
       return;
     }
+    // v7.0 item 8 — place an equipment marker: one click, fixed size, room = active room.
+    // Placement immediately starts a move-drag so a slightly-off click can be corrected in the
+    // same gesture; drymatic markers start with heat mats UNSET (flagged, never defaulted).
+    if (tool === "marker") {
+      pushUndo();
+      const kind = markerKindById(activeMarkerKind);
+      const m = { id: nid(), kind: kind.id, room: activeRoom, floorId: activeFloor, x: pt.x, y: pt.y,
+                  ...(kind.hasHeatMats ? { heatMatsM2: "" } : {}) };
+      setMarkers((a) => [...a, m]);
+      setSelMarkerId(m.id); setSelId(null);
+      drag.current = { mode: "marker-move", id: m.id, sx: pt.x, sy: pt.y, orig: { ...m } };
+      return;
+    }
     if (tool === "calibrate") { setCalLine({ x1: pt.x, y1: pt.y, x2: pt.x, y2: pt.y }); drag.current = { mode: "cal" }; return; }
     if (tool === "measure")   { setMeasure({ x1: pt.x, y1: pt.y, x2: pt.x, y2: pt.y }); drag.current = { mode: "meas" }; return; }
   };
@@ -595,6 +681,9 @@ export default function App() {
       setShapes((a) => a.map((s) => s.id !== d.id ? s :
         s.type === "rect" ? { ...s, x: o.x + dx, y: o.y + dy }
                           : { ...s, x1: o.x1 + dx, y1: o.y1 + dy, x2: o.x2 + dx, y2: o.y2 + dy }));
+    } else if (d.mode === "marker-move") {
+      const dx = pt.x - d.sx, dy = pt.y - d.sy, o = d.orig;
+      setMarkers((a) => a.map((m) => m.id !== d.id ? m : { ...m, x: o.x + dx, y: o.y + dy }));
     } else if (d.mode === "handle") {
       setShapes((a) => a.map((s) => {
         if (s.id !== d.id) return s;
@@ -645,12 +734,16 @@ export default function App() {
       if ((e.key === "Delete" || e.key === "Backspace") && selId && !isTyping(e)) {
         pushUndo(); setShapes((a) => a.filter((s) => s.id !== selId)); setSelId(null);
       }
+      if ((e.key === "Delete" || e.key === "Backspace") && selMarkerId && !isTyping(e)) {
+        pushUndo(); setMarkers((a) => a.filter((m) => m.id !== selMarkerId)); setSelMarkerId(null);
+      }
       if ((e.ctrlKey || e.metaKey) && e.key === "z" && !isTyping(e)) {
         setUndoStack((u) => {
           if (!u.length) return u;
           const prev = u[u.length - 1];
           setShapes(prev.shapes); setRooms(prev.rooms);
-          setSelId(null);   // the selection may be one of the shapes being restored/removed
+          setMarkers(prev.markers ?? []);   // pre-v7 entries in a live session have no markers key
+          setSelId(null); setSelMarkerId(null);   // the selection may be one of the items being restored/removed
           return u.slice(0, -1);
         });
       }
@@ -658,10 +751,13 @@ export default function App() {
     const ku = (e) => { if (e.code === "Space") spaceDown.current = false; };
     window.addEventListener("keydown", kd); window.addEventListener("keyup", ku);
     return () => { window.removeEventListener("keydown", kd); window.removeEventListener("keyup", ku); };
-  }, [selId, pushUndo]);
+  }, [selId, selMarkerId, pushUndo]);
   const isTyping = (e) => ["INPUT", "TEXTAREA", "SELECT"].includes(e.target.tagName);
 
   // hit tests
+  // v7.0 — markers render at MARKER_SCREEN_PX regardless of zoom, so the hit radius is the
+  // same constant converted into image coordinates.
+  const hitMarker = (m, p) => Math.hypot(p.x - m.x, p.y - m.y) < (MARKER_SCREEN_PX / 2 + 4) / zoom;
   const hitShape = (s, p) => {
     const t = 6 / zoom;
     if (s.type === "rect") return p.x >= s.x - t && p.x <= s.x + s.w + t && p.y >= s.y - t && p.y <= s.y + s.h + t;
@@ -777,12 +873,34 @@ export default function App() {
         // the value used for the maths, so that validation works as intended.
         chSet: room ? (parseFloat(room.ch) > 0) : true,
         plumbIso: room ? !!room.plumbIso : false, elecIso: room ? !!room.elecIso : false,
+        // v7.0 item 9 — per-room counts entered on the room row (raw strings, decimal-entry fix idiom)
+        elecFittings: room ? (parseFloat(room.elecFittings) || 0) : 0,
+        plumbFixtures: room ? (parseFloat(room.plumbFixtures) || 0) : 0,
         counts: {}, wallLinm: 0, corniceLinm: 0, skirtingLinm: 0, any: rs.length > 0,
+        roomId: rid,
         floorId: room ? room.floorId : null,
         voidType: room?.void_type || null,
         // a shape whose own floor disagrees with its room's is a data defect, never averaged
         floorMismatch: !!room && rs.some((s) => (s.floorId ?? room.floorId) !== room.floorId),
       };
+      // v7.0 item 1 — floor covering, per room, from this room's floor-strip shapes.
+      // Every floor-strip shape carries its own floorCov; a room's exported type is the
+      // AREA-DOMINANT covering. Mixed coverings and unset shapes are flagged, never guessed.
+      {
+        const fsShapes = rs.filter((s) => s.cat === "floor_strip");
+        const areaByCov = new Map();
+        let unset = false;
+        for (const s of fsShapes) {
+          if (!s.floorCov) { unset = true; continue; }
+          areaByCov.set(s.floorCov, (areaByCov.get(s.floorCov) || 0) + (qtyOf(s) || 0));
+        }
+        const ranked = [...areaByCov.entries()].sort((a, b) => b[1] - a[1]);
+        row.floorCovDetail = ranked[0]?.[0] || null;
+        row.floorCovClass = row.floorCovDetail ? (floorCovById(row.floorCovDetail)?.cls ?? null) : null;
+        row.floorCovMixed = ranked.length > 1;
+        row.floorCovUnset = unset && fsShapes.length > 0;
+        row.hasFloorStrip = fsShapes.length > 0;
+      }
       for (const c of CATS) {
         const cs = rs.filter((s) => s.cat === c.id);
         if (c.id === "containment") { row.counts[c.id] = cs.length; continue; }
@@ -881,7 +999,12 @@ export default function App() {
         net_m2: round2(c2Net),
         working: c2Working,
       };
-      row.counts.condition2 = round2(c2Net);   // NET is the priced figure
+      // NET is the priced figure — but ONLY when a C2 zone is actually drawn. A room with strip
+      // and NO C2 zone has no Condition 2 scope at all, not a negative one: 0 − stripped used to
+      // export here as a negative condition2_net_m2, which the engine correctly refuses as the
+      // double-height signature. Surfaced by the v7.0 acceptance run (a strip-only synthetic
+      // room hard-errored the engine); latent since v4.0 because every real room had a C2 zone.
+      row.counts.condition2 = c2Shapes.length ? round2(c2Net) : 0;
       // D1.3 — cabinetry working (footprint -> perimeter x height -> face).
       const cabShapes = rs.filter((s) => s.cat === "cabinetry");
       row.cabMissingH = cabShapes.some((s) => !cabHOf(s));
@@ -996,6 +1119,56 @@ export default function App() {
              overlap_netted: byFloor.some((b) => b.overlap_netted) };
   };
 
+  // ---------- v7.0 item 8: equipment marker aggregation ----------
+  // Counts come from PLACED MARKERS, per room, plus property-level totals (sum of rooms) so
+  // existing consumers keep a single number. heat_mats_m2 rides on drymatic markers and is
+  // REQUIRED — a blank one contributes 0 and raises a flag, never a silent default.
+  const computeEquipment = () => {
+    const byRoom = new Map();   // room id -> { <exportKey>: n..., heat_mats_m2 }
+    const totals = {};
+    for (const k of MARKER_KINDS) totals[k.exportKey] = 0;
+    totals.heat_mats_m2 = 0;
+    let heatUnset = 0, unassigned = 0;
+    for (const m of markers) {
+      const kind = markerKindById(m.kind); if (!kind) continue;
+      if (m.room == null) unassigned++;
+      const key = m.room ?? null;
+      if (!byRoom.has(key)) { const o = {}; for (const k of MARKER_KINDS) o[k.exportKey] = 0; o.heat_mats_m2 = 0; byRoom.set(key, o); }
+      const rec = byRoom.get(key);
+      rec[kind.exportKey]++; totals[kind.exportKey]++;
+      if (kind.hasHeatMats) {
+        const hm = parseFloat(m.heatMatsM2);
+        if (hm > 0) { rec.heat_mats_m2 = round2(rec.heat_mats_m2 + hm); totals.heat_mats_m2 = round2(totals.heat_mats_m2 + hm); }
+        else heatUnset++;
+      }
+    }
+    return { byRoom, totals, heatUnset, unassigned, any: markers.length > 0 };
+  };
+
+  // ---------- v7.0 item 9: containment zone consolidation ----------
+  // Drawn containment barriers can carry a zone id/name (free text on the selected shape).
+  // Named zones consolidate across rooms so a multi-room zone exports as ONE zone — this is
+  // what quantify v7.03 currently reconstructs with a CONFIRM; the explicit id kills the ask.
+  // Unzoned barriers stay per-room-only (containment_count keeps working regardless).
+  const computeContainmentZones = () => {
+    const zones = new Map();   // zone name -> { rooms:Set, barrier_count }
+    let unzoned = 0;
+    for (const s of shapes) {
+      if (s.cat !== "containment") continue;
+      const z = (s.zone || "").trim();
+      if (!z) { unzoned++; continue; }
+      if (!zones.has(z)) zones.set(z, { rooms: new Set(), barrier_count: 0 });
+      const rec = zones.get(z);
+      rec.barrier_count++;
+      const rm = rooms.find((r) => r.id === s.room);
+      if (rm) rec.rooms.add(rm.name || "(unnamed)");
+    }
+    return {
+      zones: [...zones.entries()].map(([zone_id, v]) => ({ zone_id, rooms: [...v.rooms], barrier_count: v.barrier_count })),
+      unzoned_barrier_count: unzoned,
+    };
+  };
+
   // Per-category display lines for the quantities panel — floor/ceiling strip each
   // produce two labelled outputs from the same underlying figure (strip + matching decon).
   const categoryLines = (c, row) => {
@@ -1081,6 +1254,13 @@ export default function App() {
   const buildExport = () => {
     const pt = computePropertyTotals();
     const ins = computeInsulationRemoval();
+    const eq = computeEquipment();
+    const cz = computeContainmentZones();
+    const legacyEquip = {};
+    for (const k of LEGACY_EQUIP_KEYS) {
+      const v = parseFloat(property[`legacy_${k}`]);
+      if (v > 0) legacyEquip[k] = v;
+    }
     return {
       job: jobName || "UNNAMED JOB",
       exported_at: new Date().toISOString(),
@@ -1100,11 +1280,14 @@ export default function App() {
       // it does not recognise rather than infer one. String taken verbatim from
       // BML_Markup_App_v5_0_MULTIFLOOR_PLAN.md §5 — note it drops the
       // "(bml-floorplan-quantify-quote)" qualifier that v4.x carried.
-      markup_convention: "BML v6.0 — MULTI-FLOOR; C2 NETTED; INSULATION DE-DUPLICATED",
+      markup_convention: "BML v7.0 — MULTI-FLOOR; C2 NETTED; INSULATION DE-DUPLICATED; EQUIPMENT MARKERS; FLOOR COVERINGS",
+      equipment_model: "v7.0 (CO 2026-08-27 item 8) — equipment counts come from PLACED MARKERS, per room. Each room carries split_ac_decon_insitu_count / split_ac_decommission_count / afd_count / dehumidifier_count / drymatic_boost_count / heat_mats_m2; property carries the TOTALS (sum of rooms) under the same names. LEGACY ALIASES: property.afd_units, dehum_units, drymatic_units, ac_split_units are now DERIVED from marker totals (afd_units=afd_count, dehum_units=dehumidifier_count, drymatic_units=drymatic_boost_count, ac_split_units=split_ac_decon_insitu_count) so pre-v7 consumers keep reading a number — update to the *_count keys. The ×days inputs remain property-level (equipment duration is job-level). drying_mat_units/drying_mat_days are DEAD: drying mats price per m² and export as property.drying_mats_m2. A job saved before v7.0 that still carries old unit counts exports them under property.equipment_legacy with a hard flag — they are never silently dropped and never silently converted (counts have no positions; units are not m²).",
       insulation_model: "v6.0 — INSULATION REMOVAL IS DE-DUPLICATED. Both a strip-ceiling shape and a roof-void shape can carry an insulation-removal flag, and they routinely cover the SAME void from two directions. property.insulation_removal is the AUTHORITATIVE, already-netted figure: the geometric UNION per floor and per type, with near-coincident edges snapped first. PRICE total_m2 / batts_m2 / blown_in_m2 FROM THERE. The per-room insulation_batts_m2 / insulation_blown_m2 exist ONLY on void rooms and are kept for audit ONLY: they omit every insulation-flagged strip-ceiling shape outside a void room (so summing them UNDER-charges), and within one void room they are a plain per-shape sum (so overlapping shapes there OVER-charge). Never derive insulation from them. total_m2 is the union of ALL insulation shapes and can never be overstated; where the two TYPES overlap the batts/blown split is unreliable and a hard ERROR flag says so, because the same square metre cannot have both removed. v6.0 also RETIRES ceiling_void as a room type: a ceiling void between storeys is scoped with the strip-ceiling shape and its insulation option, not as its own room. Only roof_void remains, and a roof-void shape is bound to a roof-void room by void_type — never by room name.",
       multifloor_model: "v5.0 — a job has FLOORS. floors[] carries each floor's own calibration; every room carries `floor` (the floor's TYPED label, never invented by the app — it may be \"\" if unlabelled) and `void_type`. PROPERTY SCOPE IS ENTERED ONCE PER JOB and is therefore already a combined total across every floor, including floor_protection_m2 — there is nothing to merge or de-duplicate, and a consumer must NOT attempt to. VOID ROOMS: void_type is `ceiling_void` (between an upper and a lower floor) or `roof_void` (between the top floor and the roof), and is ALWAYS an explicit human selection. Key off void_type ONLY — NEVER off the room name, which is free text: a room named \"understair void\" with void_type null is an ORDINARY room and is flagged, not reinterpreted. A void room carries decon_m2 + insulation_batts_m2 + insulation_blown_m2 + void_decon{} and is otherwise an ordinary room (own ceiling height, containment, strip). property.roof_void is GONE unless a legacy job still has roof-void shapes outside a void room, in which case it is present AND a hard ERROR flag is raised — never silently dropped.",
       condition2_model: "v5.0 — condition2_net_m2 is the PRICED figure and it is ALREADY NETTED. SURFACE: all Condition 2 shapes in a room are UNIONED (with near-coincident edges snapped within ~25 mm first, because shapes drawn by hand to abut are never numerically coincident — measured 12.9 mm and 19.3 mm on real markup — and an un-snapped union keeps the internal wall it exists to remove), then surface = 2 x union_area + union_perimeter x ceiling_height. Floor and ceiling are AREAS (2 x union area); walls are PERIMETER x height. The earlier footprint x (2 + H) form is DEAD: it multiplied the floor AREA by the height to get the wall term, which is only correct in a 4 x 4 m room — it under-read small rooms (1x1: -62%) and over-read large ones (10x10: +49%). NET: surface minus (wall_strip + ceiling_strip + floor_strip), because a stripped surface is already paid for twice (strip rate + cavity remediation) and must not be charged a third time as a Condition 2 clean. A per-shape height override (c2H) puts a shape in its own height group for double-height stairwells and raked ceilings. condition2_m2 is an ALIAS OF THE NET so no consumer can accidentally read the gross; the gross is condition2_surface_m2 (audit only). 'Full strip' no longer exists — floor_strip and ceiling_strip are separate overlays.",
-      rooms: roomRows().filter((r) => !r.isUnassigned || r.any).map((r) => ({
+      rooms: roomRows().filter((r) => !r.isUnassigned || r.any).map((r) => {
+        const rEq = eq.byRoom.get(r.roomId ?? null) || null;
+        return {
         name: r.name, ceiling_height: r.ch,
         // the floor's TYPED label (never invented by the app); "" if Jordan hasn't labelled it yet
         floor: r.floorId ? (floors.find((f) => f.id === r.floorId)?.name || "") : null,
@@ -1134,6 +1317,23 @@ export default function App() {
         wall_strip: r.wallWorking || null,
         cornice_linm: round2(r.corniceLinm), skirting_linm: round2(r.skirtingLinm),
         containment_count: r.counts.containment,
+        // v7.0 item 1 — floor covering (detail verbatim from the selector; type is the 3-class
+        // enum quantify already consumes). null when no floor-strip in the room or none chosen.
+        floor_covering_detail: r.floorCovDetail,
+        floor_covering_type: r.floorCovClass,
+        // v7.0 item 9 — entered on the room row; quantify v7.06/v7.03 reads these and confirms
+        // loudly when absent, so 0 is a REAL zero, not a default.
+        electrical_fitting_count: r.elecFittings,
+        plumbing_fixture_count: r.plumbFixtures,
+        // v7.0 item 8 — equipment marker counts for THIS room (only present when markers exist)
+        ...(rEq ? {
+          split_ac_decon_insitu_count: rEq.split_ac_decon_insitu_count,
+          split_ac_decommission_count: rEq.split_ac_decommission_count,
+          afd_count: rEq.afd_count,
+          dehumidifier_count: rEq.dehumidifier_count,
+          drymatic_boost_count: rEq.drymatic_boost_count,
+          heat_mats_m2: rEq.heat_mats_m2,
+        } : {}),
         // v4.2 - internal productivity signals (QUANTITIES ONLY, never priced here)
         productivity: {
           setups: r.any ? 1 : 0,                       // one mobilisation per room entered
@@ -1143,21 +1343,40 @@ export default function App() {
           _note: "Set-up = one per room entered. wall_runs = separate drawn strip runs; a 90-degree change of angle is a new run. Short average run length and many set-ups = slower per m2; long continuous runs = faster per m2. For Jordan's internal judgement on the rate/hours only - NOT a client-facing figure and NOT priced by this app.",
         },
         plumbing_iso: r.plumbIso, electrical_iso: r.elecIso,
-      })),
+      };}),
       // Property scope is entered ONCE per job and is therefore already a combined total across
       // every floor — there is nothing for a downstream consumer to merge or de-duplicate.
       property: {
-        // afd_* is the current key (Air Filtration Devices). adf_* is a DEPRECATED ALIAS kept so
-        // the pricing engine keeps working through the phase-6 sweep; drop it once that lands.
-        afd_units: parseFloat(property.afd_units) || 0, afd_days: parseFloat(property.afd_days) || 0,
-        adf_units: parseFloat(property.afd_units) || 0, adf_days: parseFloat(property.afd_days) || 0,
-        dehum_units: parseFloat(property.dehum_units) || 0, dehum_days: parseFloat(property.dehum_days) || 0,
+        // v7.0 item 8 — equipment TOTALS derived from placed markers (sum of rooms), under the
+        // per-room names, PLUS legacy aliases so pre-v7 consumers keep reading a single number.
+        split_ac_decon_insitu_count: eq.totals.split_ac_decon_insitu_count,
+        split_ac_decommission_count: eq.totals.split_ac_decommission_count,
+        afd_count: eq.totals.afd_count,
+        dehumidifier_count: eq.totals.dehumidifier_count,
+        drymatic_boost_count: eq.totals.drymatic_boost_count,
+        heat_mats_m2: eq.totals.heat_mats_m2,
+        // legacy aliases (DERIVED — see equipment_model; drop after the engine moves to *_count)
+        afd_units: eq.totals.afd_count, adf_units: eq.totals.afd_count,
+        dehum_units: eq.totals.dehumidifier_count,
+        drymatic_units: eq.totals.drymatic_boost_count,
+        ac_split_units: eq.totals.split_ac_decon_insitu_count,
+        // ×days stay as job-level inputs (equipment duration is not a per-room fact)
+        afd_days: parseFloat(property.afd_days) || 0, adf_days: parseFloat(property.afd_days) || 0,
+        dehum_days: parseFloat(property.dehum_days) || 0,
         dbkii_days: parseFloat(property.dbkii_days) || 0,
-        drymatic_units: parseFloat(property.drymatic_units) || 0, drymatic_days: parseFloat(property.drymatic_days) || 0,
-        drying_mat_units: parseFloat(property.drying_mat_units) || 0, drying_mat_days: parseFloat(property.drying_mat_days) || 0,
+        drymatic_days: parseFloat(property.drymatic_days) || 0,
+        // v7.0 item 4 — drying mats price per m², not per unit. drying_mat_units/days are DEAD.
+        drying_mats_m2: parseFloat(property.drying_mats_m2) || 0,
         air_mover_units: parseFloat(property.air_mover_units) || 0, air_mover_days: parseFloat(property.air_mover_days) || 0,
-        ac_ducted_units: parseFloat(property.ac_ducted_units) || 0, ac_split_units: parseFloat(property.ac_split_units) || 0,
+        ac_ducted_units: parseFloat(property.ac_ducted_units) || 0,
         ac_duct_removal_rooms: parseFloat(property.ac_duct_removal_rooms) || 0,
+        // v7.0 — pre-v7 unit counts that can NEVER be silently converted (counts have no marker
+        // positions; drying-mat units are not m²). Present only when a legacy job carries them,
+        // always with a hard flag. Gone once Jordan places the markers / enters the m².
+        ...(Object.keys(legacyEquip).length ? { equipment_legacy: legacyEquip } : {}),
+        // v7.0 item 9 — named containment zones (multi-room zones consolidated at the source;
+        // per-room containment_count is retained for backward compatibility).
+        containment_zones: cz.zones,
         prv_areas: parseFloat(property.prv_areas) || 0,
         contents_packout: !!property.contents_packout, contents_inventory: !!property.contents_inventory,
         contents_storage: property.contents_storage,
@@ -1188,6 +1407,25 @@ export default function App() {
       flags: [
         ...(shapes.some((s) => s.room == null && !catById(s.cat)?.propertyScope)
           ? [mkFlag("UNASSIGNED_SHAPES", "ERROR", "UNASSIGNED shapes present — reassign before pricing")] : []),
+        // v7.0 item 8 — markers with no room would export counts against no room (orphan lines).
+        ...(eq.unassigned > 0
+          ? [mkFlag("UNASSIGNED_MARKERS", "ERROR", `ERROR — ${eq.unassigned} equipment marker(s) have NO ROOM. Select each marker and assign its room — an unassigned marker's count reaches the quote as an orphan line.`)] : []),
+        // v7.0 item 8 — heat mats m² is REQUIRED on every drymatic marker; blank contributes 0.
+        ...(eq.heatUnset > 0
+          ? [mkFlag("HEAT_MATS_NOT_SET", "ERROR", `ERROR — ${eq.heatUnset} Drymatic boost marker(s) have NO heat mats m² entered. The marker counts, but its heat-mat area is contributing ZERO — enter the m² on each marker.`)] : []),
+        // v7.0 — legacy unit counts riding along from a pre-v7 job. Never silently dropped,
+        // never silently converted; Jordan places markers / enters m² and they disappear.
+        ...(Object.keys(legacyEquip).length
+          ? [mkFlag("EQUIPMENT_LEGACY_COUNTS", "ERROR", `ERROR — this job carries pre-v7.0 equipment unit counts (${Object.entries(legacyEquip).map(([k, v]) => `${k}=${v}`).join(", ")}) which CANNOT be auto-converted (counts have no positions; drying-mat units are not m²). They are exported under property.equipment_legacy. Place the equivalent markers / enter drying mats m², then clear the old values via a fresh save — do not price both.`)] : []),
+        // v7.0 item 1 — floor covering is REQUIRED on floor-strip scope; never defaulted.
+        ...roomRows().filter((r) => r.floorCovUnset)
+          .map((r) => mkFlag("FLOOR_COVERING_NOT_SET", "ERROR",
+            `ERROR — ${r.name}: floor-strip drawn with NO floor covering selected. Select the covering on each floor-strip shape — the strip rate depends on it, and the engine will not guess.`,
+            { room: r.name, floor: floors.find((f) => f.id === r.floorId)?.name || "" })),
+        ...roomRows().filter((r) => r.floorCovMixed)
+          .map((r) => mkFlag("FLOOR_COVERING_MIXED", "FLAG",
+            `FLAG — ${r.name}: floor-strip shapes carry MORE THAN ONE covering type. The room exports the area-dominant type (${r.floorCovDetail}); check that is what should price, or split the room.`,
+            { room: r.name, floor: floors.find((f) => f.id === r.floorId)?.name || "" })),
         // Job-wide "nothing is calibrated at all". Per-floor gaps are reported separately below,
         // so adding an uncalibrated second floor never invalidates a calibrated first one.
         ...(!floors.some((f) => f.scale)
@@ -1323,25 +1561,43 @@ export default function App() {
     }
     return out;
   };
-  const exportScopeImage = async () => {
-    if (!img) { alert("Load this floor's plan image first — the scope image is drawn on the plan."); return; }
+  // v7.0 item 2 — one image PER OVERLAY plus the combined. Where transparent fills overlap on
+  // the combined image the colours blend, shapes disappear and the legend stops matching what
+  // is visible; a single-layer image has no blending and its legend is exact by construction.
+  // overlay: "ALL" | a category id | "equipment" (markers get their own layer).
+  const loadImageEl = (src) => new Promise((res, rej) => {
+    const el = new Image();
+    el.onload = () => res(el); el.onerror = rej; el.src = src;
+  });
+  const renderScopeBlob = async (overlay) => {
     const fid = activeFloor;
     const fRec = activeFloorRec;
-    const fShapes = shapes.filter((s) => (s.floorId ?? fid) === fid);
-    if (!fShapes.length) { alert("Nothing is marked up on this floor yet."); return; }
-    const entries = scopeLegendEntries(fid, fShapes);
-    try {
-      const im = await new Promise((res, rej) => {
-        const el = new Image();
-        el.onload = () => res(el); el.onerror = rej; el.src = img.src;
-      });
+    const allShapes = shapes.filter((s) => (s.floorId ?? fid) === fid);
+    const allMarkers = markers.filter((m) => (m.floorId ?? fid) === fid);
+    const fShapes = overlay === "ALL" ? allShapes : overlay === "equipment" ? [] : allShapes.filter((s) => s.cat === overlay);
+    const fMarkers = (overlay === "ALL" || overlay === "equipment") ? allMarkers : [];
+    // legend: exactly what THIS image shows — a single-layer image never lists another layer
+    let entries = overlay === "equipment" ? [] : scopeLegendEntries(fid, fShapes);
+    const markerEntries = fMarkers.length
+      ? MARKER_KINDS.map((k) => {
+          const ms = fMarkers.filter((m) => m.kind === k.id);
+          if (!ms.length) return null;
+          const heat = k.hasHeatMats ? round2(ms.reduce((a, m) => a + (parseFloat(m.heatMatsM2) || 0), 0)) : 0;
+          return { icon: k.icon, label: k.label, text: `${ms.length} ×${k.hasHeatMats ? (heat > 0 ? ` · ${fmt(heat)} m² heat mats` : " · heat mats NOT SET ⚠") : ""}` };
+        }).filter(Boolean)
+      : [];
+    {
+      const im = await loadImageEl(img.src);
+      const iconEls = {};
+      for (const k of MARKER_KINDS) if (fMarkers.some((m) => m.kind === k.id)) iconEls[k.id] = await loadImageEl(k.icon);
       const W0 = img.w, H0 = img.h;
       const fs = Math.max(13, Math.round(W0 / 85));          // scale type to the plan, not the screen
       const PAD = Math.round(fs * 1.2);
       const headerH = Math.round(fs * 3.4);
       const rowH = Math.round(fs * 1.75);
-      const cols = entries.length > 7 ? 2 : 1;
-      const legendH = entries.length ? Math.round(fs * 1.6) + Math.ceil(entries.length / cols) * rowH : 0;
+      const legendCount = entries.length + markerEntries.length;
+      const cols = legendCount > 7 ? 2 : 1;
+      const legendH = legendCount ? Math.round(fs * 1.6) + Math.ceil(legendCount / cols) * rowH : 0;
       const footerH = Math.round(fs * 2.2);
       const W = W0 + PAD * 2, H = headerH + H0 + legendH + footerH;
       const cv = document.createElement("canvas");
@@ -1353,7 +1609,8 @@ export default function App() {
       g.font = `600 ${Math.round(fs * 1.15)}px system-ui, sans-serif`;
       g.fillText(jobName || "UNNAMED JOB", PAD, Math.round(fs * 0.6));
       g.font = `${fs}px system-ui, sans-serif`; g.fillStyle = "#444";
-      g.fillText(`Scope markup${fRec?.name?.trim() ? ` — floor ${fRec.name.trim()}` : ""}`, PAD, Math.round(fs * 2.0));
+      const overlayLabel = overlay === "ALL" ? "all layers" : overlay === "equipment" ? "Equipment" : (catById(overlay)?.label || overlay);
+      g.fillText(`Scope markup${fRec?.name?.trim() ? ` — floor ${fRec.name.trim()}` : ""} — ${overlayLabel}`, PAD, Math.round(fs * 2.0));
       // plan + shapes
       g.drawImage(im, PAD, headerH, W0, H0);
       g.save();
@@ -1372,6 +1629,15 @@ export default function App() {
           g.setLineDash([]);
         }
       }
+      // v7.0 item 8 — equipment markers, sized relative to the plan (not the on-screen constant)
+      const ms = Math.round(fs * 2.2);
+      for (const m of fMarkers) {
+        const el = iconEls[m.kind]; if (!el) continue;
+        g.fillStyle = "#ffffff";
+        g.beginPath(); g.arc(m.x, m.y, ms / 2 + Math.max(2, fs / 8), 0, Math.PI * 2); g.fill();
+        g.strokeStyle = "#333"; g.lineWidth = Math.max(1, fs / 14); g.stroke();
+        g.drawImage(el, m.x - ms / 2, m.y - ms / 2, ms, ms);
+      }
       g.restore();
       // legend — only what is actually on THIS plan, never the full catalogue
       let y = headerH + H0 + Math.round(fs * 0.5);
@@ -1379,14 +1645,18 @@ export default function App() {
       g.fillText("KEY", PAD, y);
       y += Math.round(fs * 1.5);
       const colW = Math.floor((W - PAD * 2) / cols);
-      entries.forEach((e, i) => {
+      [...entries, ...markerEntries].forEach((e, i) => {
         const cx = PAD + (i % cols) * colW;
         const cy = y + Math.floor(i / cols) * rowH;
         const sw = Math.round(fs * 1.1);
-        g.fillStyle = hexToRgba(e.color, e.kind === "line" ? 1 : FILL_OPACITY);
-        g.fillRect(cx, cy + Math.round(fs * 0.2), sw, e.kind === "line" ? Math.round(fs * 0.35) : sw);
-        g.strokeStyle = e.color; g.lineWidth = 1.5;
-        g.strokeRect(cx, cy + Math.round(fs * 0.2), sw, e.kind === "line" ? Math.round(fs * 0.35) : sw);
+        if (e.icon && iconEls[MARKER_KINDS.find((k) => k.icon === e.icon)?.id]) {
+          g.drawImage(iconEls[MARKER_KINDS.find((k) => k.icon === e.icon).id], cx, cy, sw, sw);
+        } else {
+          g.fillStyle = hexToRgba(e.color, e.kind === "line" ? 1 : FILL_OPACITY);
+          g.fillRect(cx, cy + Math.round(fs * 0.2), sw, e.kind === "line" ? Math.round(fs * 0.35) : sw);
+          g.strokeStyle = e.color; g.lineWidth = 1.5;
+          g.strokeRect(cx, cy + Math.round(fs * 0.2), sw, e.kind === "line" ? Math.round(fs * 0.35) : sw);
+        }
         g.fillStyle = "#111"; g.font = `${Math.round(fs * 0.92)}px system-ui, sans-serif`;
         g.fillText(e.label, cx + sw + Math.round(fs * 0.6), cy + Math.round(fs * 0.15));
         g.font = `600 ${Math.round(fs * 0.92)}px system-ui, sans-serif`;
@@ -1398,18 +1668,53 @@ export default function App() {
       g.fillText(`${new Date().toLocaleDateString("en-AU")} · bml-floorplan-markup ${APP_VERSION} · quantities only, not a priced document`,
         PAD, H - footerH + Math.round(fs * 0.5));
 
-      const jobNo = (jobName.match(/BMLJ\d+/i) || [])[0] || (jobName || "job").replace(/\s+/g, "_").slice(0, 40);
-      const floorLbl = (fRec?.name?.trim() || "Floor").replace(/[^\w-]+/g, "_");
-      const filename = `${jobNo}_Scope_${floorLbl}.png`;
-      cv.toBlob((blob) => {
-        if (!blob) { alert("Could not render the scope image."); return; }
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement("a");
-        a.href = url; a.download = filename;
-        document.body.appendChild(a); a.click(); a.remove();
-        setTimeout(() => URL.revokeObjectURL(url), 1000);
-      }, "image/png");
+      return await new Promise((res) => cv.toBlob(res, "image/png"));
+    }
+  };
+  const downloadBlob = (blob, filename) => {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = filename;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 2000);
+  };
+  const scopeFileBase = () => {
+    const jobNo = (jobName.match(/BMLJ\d+/i) || [])[0] || (jobName || "job").replace(/\s+/g, "_").slice(0, 40);
+    const floorLbl = (activeFloorRec?.name?.trim() || "Floor").replace(/[^\w-]+/g, "_");
+    return `${jobNo}_Scope_${floorLbl}`;
+  };
+  // The combined image alone (renamed *_ALL per the CO's convention).
+  const exportScopeImage = async () => {
+    if (!img) { alert("Load this floor's plan image first — the scope image is drawn on the plan."); return; }
+    const fid = activeFloor;
+    if (!shapes.some((s) => (s.floorId ?? fid) === fid) && !markers.some((m) => (m.floorId ?? fid) === fid)) { alert("Nothing is marked up on this floor yet."); return; }
+    try {
+      const blob = await renderScopeBlob("ALL");
+      if (!blob) throw new Error("no blob");
+      downloadBlob(blob, `${scopeFileBase()}_ALL.png`);
     } catch { alert("Could not render the scope image."); }
+  };
+  // v7.0 item 2 — one image per overlay actually used on this floor, PLUS the combined.
+  // Sequential with a small gap: browsers throttle a burst of programmatic downloads.
+  const exportScopeImagesPerOverlay = async () => {
+    if (!img) { alert("Load this floor's plan image first — the scope images are drawn on the plan."); return; }
+    const fid = activeFloor;
+    const fShapes = shapes.filter((s) => (s.floorId ?? fid) === fid);
+    const fMarkers = markers.filter((m) => (m.floorId ?? fid) === fid);
+    if (!fShapes.length && !fMarkers.length) { alert("Nothing is marked up on this floor yet."); return; }
+    const overlays = [
+      ...CATS.filter((c) => fShapes.some((s) => s.cat === c.id)).map((c) => ({ id: c.id, suffix: c.id })),
+      ...(fMarkers.length ? [{ id: "equipment", suffix: "equipment" }] : []),
+      { id: "ALL", suffix: "ALL" },
+    ];
+    try {
+      for (const ov of overlays) {
+        const blob = await renderScopeBlob(ov.id);
+        if (!blob) throw new Error("no blob");
+        downloadBlob(blob, `${scopeFileBase()}_${ov.suffix}.png`);
+        await new Promise((r) => setTimeout(r, 350));
+      }
+    } catch { alert("Could not render one of the scope images."); }
   };
 
   const exportQuantities = () => {
@@ -1427,14 +1732,15 @@ export default function App() {
   const exportProject = () => {
     const filename = `${(jobName || "job").replace(/\s+/g, "_")}_markup_PROJECT.json`;
     const data = {
-      // v6 adds insulation/insulationType on ceiling_strip shapes and retires ceiling_void.
-      // Import accepts any version (it keys off `format`), so v2-v5 files still load.
-      format: "bml-markup-project", version: 6, image_embedded: false,
+      // v7 adds markers[] (equipment), floorCov on floor-strip shapes, zone on containment
+      // lines, elecFittings/plumbFixtures on rooms, and the reshaped property block.
+      // Import accepts any version (it keys off `format`), so v2-v6 files still load.
+      format: "bml-markup-project", version: 7, image_embedded: false,
       savedAt: new Date().toISOString(),
       imgW: img?.w || 0, imgH: img?.h || 0,
       // v5.0: floors[] plus floorId-tagged rooms/shapes. calLine/scale are still written as a
       // first-floor mirror so the live v4.2 app can still read a file saved from here.
-      jobName, rooms, shapes, property, floors, activeFloor,
+      jobName, rooms, shapes, markers, property, floors, activeFloor,
       calLine: floors[0]?.calLine ?? null, scale: floors[0]?.scale ?? null,
     };
     const text = JSON.stringify(data);
@@ -1484,10 +1790,11 @@ export default function App() {
       setJobId(id); setJobName(d.jobName || ""); setRooms(mig.rooms);
       setActiveRoom(mig.rooms.find((r) => r.floorId === af)?.id ?? null);
       setShapes(mig.shapes); setFloors(mig.floors); setActiveFloor(af);
+      setMarkers(mig.markers); setSelMarkerId(null);
       setSelId(null); setUndoStack([]);
       setProperty(migrateProperty(d.property));
       setHiddenCats(new Set()); setHiddenRooms(new Set());
-      idRef.current = Math.max(1, ...shapes.map((s) => s.id + 1), ...(d.rooms || []).map((x) => x.id + 1));
+      idRef.current = Math.max(1, ...shapes.map((s) => s.id + 1), ...(d.rooms || []).map((x) => x.id + 1), ...(d.markers || []).map((m) => m.id + 1));
       if (d.img?.src) {
         // legacy v2.1 project files with embedded image (always single-floor)
         setImg(d.img);
@@ -1586,14 +1893,48 @@ export default function App() {
   };
 
   const sel = shapes.find((s) => s.id === selId);
+  const selMarker = markers.find((m) => m.id === selMarkerId);
   const measLen = measure ? Math.hypot(measure.x2 - measure.x1, measure.y2 - measure.y1) : 0;
   const labelFs = Math.max(11 / zoom, 2);
   const saveLabel = { idle: "", dirty: "Unsaved…", saving: "Saving…", saved: "Saved ✓", error: "SAVE FAILED — export project JSON now" }[saveState];
   const versionStamp = `${APP_VERSION}${BUILD_DATE ? ` · ${BUILD_DATE}` : ""}`;
 
   // ---------- modals (shared between views) ----------
+  // v7.0 items 6+7 — ALL instruction text in one place, shown in the first-open modal AND the
+  // collapsible Instructions section. Nothing was deleted from the old always-visible copy; the
+  // C2 netting line is REWORDED per the CO with one correction: the CO's draft said "the pricing
+  // engine subtracts stripped surfaces" — since v4.0 the APP nets at export and the engine
+  // asserts the netted figure. The instruction to Jordan (draw the full zone) is identical
+  // under both mechanisms; the attribution is now the true one. Deviation logged for the PRC.
+  const instructionsBody = (
+    <>
+      <div style={st.meta}><strong style={{ color: "#e8e6e1" }}>Condition 2 (blue):</strong> C2 zone total = gross floor + ceiling + walls of the drawn zone. Do NOT try to exclude strip-out areas from the zone — stripped surfaces are subtracted automatically (the app nets them out of the exported C2 figure; the pricing engine asserts that netted figure, prices strip areas at strip rates and only the REMAINDER at decon rates). Drawing around strip areas double-nets and under-prices the decon. Part-room zones are fine.</div>
+      <div style={st.meta}><strong style={{ color: "#e8e6e1" }}>Spot cuts:</strong> draw the ACTUAL cutout area (incl. your strip-past-contamination allowance) — quantities price what you draw.</div>
+      <div style={st.meta}><strong style={{ color: "#e8e6e1" }}>Selecting:</strong> click again on overlapping shapes (same spot) to select the one underneath — cycles through the stack. Shift = straight lines · Del = delete selected · Ctrl+Z = undo · scroll = zoom · space-drag = pan.</div>
+      <div style={st.meta}><strong style={{ color: "#e8e6e1" }}>Floor strip:</strong> every floor-strip shape needs its floor covering selected — the strip rate depends on it and the export hard-errors without it.</div>
+      <div style={st.meta}><strong style={{ color: "#e8e6e1" }}>Equipment:</strong> place icon markers on the plan (section 3), tagged to the active room — counts export per room. Drymatic markers also need heat mats m². Days are entered once, in Property scope.</div>
+      <div style={st.meta}><strong style={{ color: "#e8e6e1" }}>Floors:</strong> each floor has its OWN plan image and calibration. Labels are yours — the app never names a floor. Roof-void shapes bind to a roof void room; a ceiling void between storeys is scoped with strip-ceiling + its insulation option.</div>
+      <div style={st.meta}><strong style={{ color: "#e8e6e1" }}>Never priced here:</strong> this tool exports quantities only — rates and pricing live in the engine.</div>
+    </>
+  );
+
   const modals = (
     <>
+      {instructionsOpen && (
+        <div style={st.overlay}>
+          <div style={{ ...st.modal, maxWidth: 560 }} onClick={(e) => e.stopPropagation()}>
+            <div style={{ ...st.h, fontSize: 13 }}>How to mark up (read once)</div>
+            {instructionsBody}
+            <div style={st.row}>
+              <button style={{ ...btn(false), flex: 1, background: "#2f6df6", borderColor: "#2f6df6", color: "#fff" }}
+                onClick={() => setInstructionsOpen(false)}>
+                Got it — start marking up
+              </button>
+            </div>
+            <div style={{ ...st.meta, fontSize: 10.5 }}>This text stays available under the "Instructions" section in the left bar.</div>
+          </div>
+        </div>
+      )}
       {exportModal && (
         <div style={st.overlay} onClick={() => setExportModal(null)}>
           <div style={st.modal} onClick={(e) => e.stopPropagation()}>
@@ -1670,10 +2011,11 @@ export default function App() {
 
   const propertyTotals = computePropertyTotals();
   const insulationTotals = computeInsulationRemoval();
+  const equipTotals = computeEquipment();
   const anyPropertyEntered = propertyTotals.decon_m2 > 0 || insulationTotals.total_m2 > 0 ||
-    propertyTotals.floorProt > 0 || parseFloat(property.afd_units) > 0 || parseFloat(property.dehum_units) > 0 ||
-    parseFloat(property.drymatic_units) > 0 || parseFloat(property.drying_mat_units) > 0 || parseFloat(property.air_mover_units) > 0 ||
-    parseFloat(property.dbkii_days) > 0 || parseFloat(property.ac_ducted_units) > 0 || parseFloat(property.ac_split_units) > 0 ||
+    propertyTotals.floorProt > 0 || equipTotals.any ||
+    parseFloat(property.drying_mats_m2) > 0 || parseFloat(property.air_mover_units) > 0 ||
+    parseFloat(property.dbkii_days) > 0 || parseFloat(property.ac_ducted_units) > 0 ||
     parseFloat(property.ac_duct_removal_rooms) > 0 ||
     parseFloat(property.prv_areas) > 0 || property.contents_packout || property.contents_inventory ||
     property.skip_bin || property.asbestos_testing || property.contents_storage !== "none";
@@ -1805,6 +2147,16 @@ export default function App() {
                     <input type="checkbox" checked={!!r.elecIso}
                       onChange={(e) => setRooms((a) => a.map((x) => x.id === r.id ? { ...x, elecIso: e.target.checked } : x))} />EL
                   </label>
+                  {/* v7.0 item 9 — per-room counts quantify reads and otherwise CONFIRMs on:
+                      EF = electrical fittings on linings being stripped; PF = plumbing fixtures */}
+                  <label title="Electrical fittings on linings being stripped (count)" onClick={(e) => e.stopPropagation()} style={{ display: "flex", alignItems: "center", gap: 2, fontSize: 10.5, color: "#8b909a" }}>
+                    EF<input style={{ ...st.chInput, width: 28 }} value={r.elecFittings ?? ""} inputMode="numeric"
+                      onChange={(e) => setRooms((a) => a.map((x) => x.id === r.id ? { ...x, elecFittings: e.target.value } : x))} />
+                  </label>
+                  <label title="Plumbing fixtures (count — plumbing prices base + per fixture)" onClick={(e) => e.stopPropagation()} style={{ display: "flex", alignItems: "center", gap: 2, fontSize: 10.5, color: "#8b909a" }}>
+                    PF<input style={{ ...st.chInput, width: 28 }} value={r.plumbFixtures ?? ""} inputMode="numeric"
+                      onChange={(e) => setRooms((a) => a.map((x) => x.id === r.id ? { ...x, plumbFixtures: e.target.value } : x))} />
+                  </label>
                   <span title="Toggle this room's shapes on canvas" style={{ cursor: "pointer", opacity: hiddenRooms.has(r.id) ? 1 : 0.5 }}
                     onClick={(e) => { e.stopPropagation(); toggleHiddenRoom(r.id); }}>👁</span>
                   <span title="Delete this room" style={{ cursor: "pointer", opacity: 0.6 }}
@@ -1831,6 +2183,19 @@ export default function App() {
                   </button>
                 ))}
               </div>
+              {/* v7.0 item 1 — covering REQUIRED on floor-strip scope; strip rate depends on it */}
+              {activeCat === "floor_strip" && (
+                <div style={st.selBox}>
+                  <div style={st.row}>
+                    <span style={st.meta}>Floor covering:</span>
+                    <select style={{ ...st.selectEl, flex: 1 }} value={floorCov} onChange={(e) => setFloorCov(e.target.value)}>
+                      <option value="">— select covering —</option>
+                      {FLOOR_COVERINGS.map((c) => <option key={c.value} value={c.value}>{c.label}</option>)}
+                    </select>
+                  </div>
+                  {!floorCov && <div style={{ ...st.meta, color: "#e8b34b" }}>No covering selected — new shapes will need one set before export (the strip rate depends on it).</div>}
+                </div>
+              )}
               {activeCat === "wall_strip" && (
                 <div style={st.selBox}>
                   <div style={st.row}>
@@ -1908,14 +2273,27 @@ export default function App() {
                   {!cabHgt && <div style={{ ...st.meta, color: "#e8b34b" }}>No height selected — new shapes will need one set before export (face area cannot price a footprint).</div>}
                 </div>
               )}
+              {/* v7.0 item 8 — equipment markers: pick a kind, click the plan to place. Fixed-size
+                  point markers, room = active room, multiple per room. */}
+              <div style={{ ...st.meta, marginTop: 4 }}>Equipment markers (click plan to place — tagged to the active room):</div>
+              <div style={st.chips}>
+                {MARKER_KINDS.map((k) => (
+                  <button key={k.id} style={chip({ color: "#8b909a" }, tool === "marker" && activeMarkerKind === k.id)}
+                    onClick={() => { setActiveMarkerKind(k.id); setTool("marker"); }} disabled={!img}
+                    title={k.label}>
+                    <img src={k.icon} alt="" style={{ width: 16, height: 16 }} />
+                    <span>{k.label}</span>
+                  </button>
+                ))}
+              </div>
               <div style={st.row}>
                 <button style={btn(tool === "select")} onClick={() => setTool("select")}>Select / edit</button>
                 <button style={btn(tool === "pan")} onClick={() => setTool("pan")}>Pan</button>
                 <button style={btn(false)} onClick={showAll}>Show all</button>
               </div>
+              {/* v7.0 item 6 — the long instruction text moved to the Instructions section +
+                  first-open modal; only the always-useful keyboard line stays here. */}
               <div style={st.meta}>Shift = straight lines · Del = delete selected · Ctrl+Z = undo · scroll = zoom · space-drag = pan</div>
-              <div style={st.meta}>Click again on overlapping shapes (same spot) to select the one underneath — cycles through the stack.</div>
-              <div style={st.meta}>Blue C2 = draw the remediation zone (part-room is fine). Total = floor + ceiling + walls of the zone — no automatic netting of stripped areas. Spot cuts: draw the ACTUAL cutout area (incl. your strip-past-contamination allowance) — quantities price what you draw.</div>
               {sel && (
                 <div style={st.selBox}>
                   <div style={st.meta}>Selected: {catById(sel.cat).label} — {shapeLabel(sel)}</div>
@@ -1991,6 +2369,29 @@ export default function App() {
                         onChange={(e) => { pushUndo(); const v = e.target.value; setShapes((a) => a.map((s) => s.id === sel.id ? { ...s, c2H: v } : s)); }} inputMode="decimal" />
                     </div>
                   )}
+                  {/* v7.0 item 1 — covering on THIS floor-strip shape (required before export) */}
+                  {sel.cat === "floor_strip" && (
+                    <>
+                      <div style={st.row}>
+                        <span style={st.meta}>Floor covering:</span>
+                        <select style={{ ...st.selectEl, flex: 1 }} value={sel.floorCov ?? ""}
+                          onChange={(e) => { pushUndo(); const v = e.target.value; setShapes((a) => a.map((s) => s.id === sel.id ? { ...s, floorCov: v } : s)); }}>
+                          <option value="">— select covering —</option>
+                          {FLOOR_COVERINGS.map((c) => <option key={c.value} value={c.value}>{c.label}</option>)}
+                        </select>
+                      </div>
+                      {!sel.floorCov && <div style={{ ...st.meta, color: "#e8b34b" }}>No covering set — this shape exports as a hard ERROR (the strip rate depends on it).</div>}
+                    </>
+                  )}
+                  {/* v7.0 item 9 — optional zone id so a multi-room containment zone exports as
+                      ONE consolidated zone instead of a per-room reconstruction downstream */}
+                  {sel.cat === "containment" && (
+                    <div style={st.row}>
+                      <span style={st.meta}>Zone (optional):</span>
+                      <input style={{ ...st.input, flex: 1 }} placeholder="e.g. Zone A — kitchen + hall" value={sel.zone ?? ""}
+                        onChange={(e) => { pushUndo(); const v = e.target.value; setShapes((a) => a.map((s) => s.id === sel.id ? { ...s, zone: v } : s)); }} />
+                    </div>
+                  )}
                   <div style={st.row}>
                     <select style={{ ...st.selectEl, flex: 1 }} value={sel.room ?? ""}
                       onChange={(e) => { pushUndo(); const v = e.target.value ? Number(e.target.value) : null; setShapes((a) => a.map((s) => s.id === sel.id ? { ...s, room: v } : s)); }}>
@@ -2005,32 +2406,81 @@ export default function App() {
                   </div>
                 </div>
               )}
+              {/* v7.0 item 8 — selected equipment marker */}
+              {selMarker && (() => {
+                const kind = markerKindById(selMarker.kind);
+                return (
+                  <div style={st.selBox}>
+                    <div style={{ ...st.meta, display: "flex", alignItems: "center", gap: 6 }}>
+                      <img src={kind.icon} alt="" style={{ width: 18, height: 18 }} />
+                      Selected marker: {kind.label}
+                    </div>
+                    {kind.hasHeatMats && (
+                      <>
+                        <div style={st.row}>
+                          <span style={st.meta}>Heat mats (m²):</span>
+                          <input style={{ ...st.input, flex: 1 }} value={selMarker.heatMatsM2 ?? ""} inputMode="decimal"
+                            onChange={(e) => { pushUndo(); const v = e.target.value; setMarkers((a) => a.map((m) => m.id === selMarker.id ? { ...m, heatMatsM2: v } : m)); }} />
+                        </div>
+                        {!(parseFloat(selMarker.heatMatsM2) > 0) && <div style={{ ...st.meta, color: "#e8b34b" }}>Heat mats m² is required — blank exports a hard ERROR and contributes zero.</div>}
+                      </>
+                    )}
+                    <div style={st.row}>
+                      <select style={{ ...st.selectEl, flex: 1 }} value={selMarker.room ?? ""}
+                        onChange={(e) => { pushUndo(); const v = e.target.value ? Number(e.target.value) : null; setMarkers((a) => a.map((m) => m.id === selMarker.id ? { ...m, room: v } : m)); }}>
+                        <option value="">Unassigned</option>
+                        {rooms.filter((r) => (r.floorId ?? activeFloor) === activeFloor).map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
+                      </select>
+                      <button style={btn(false)} onClick={() => { pushUndo(); setMarkers((a) => a.filter((m) => m.id !== selMarker.id)); setSelMarkerId(null); }}>Delete</button>
+                    </div>
+                  </div>
+                );
+              })()}
             </>
           )}
+        </div>
+
+        {/* v7.0 item 6 — the long instructions live here (collapsed by default) + in the
+            first-open modal; they no longer squat permanently in the bar */}
+        <div style={st.section}>
+          {sectionHead("instructions", "Instructions")}
+          {!collapsed.instructions && instructionsBody}
         </div>
 
         <div style={st.section}>
           {sectionHead("property", "4 · Property scope")}
           {!collapsed.property && (
             <>
-              <div style={{ ...st.meta, fontSize: 10.5, marginTop: 2 }}>Drying / equipment — entered ONCE for the whole job (all floors combined).</div>
+              {/* v7.0 item 8 — unit counts now come from PLACED MARKERS (section 3); only the
+                  job-level ×days inputs remain here. Live totals shown so what will export is
+                  visible while placing. */}
+              <div style={{ ...st.meta, fontSize: 10.5, marginTop: 2 }}>
+                Equipment counts come from markers on the plan (section 3). Days are job-level:
+              </div>
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 4 }}>
-                {propNumField("AFD units", "afd_units")}
-                {propNumField("× days", "afd_days")}
-                {propNumField("Dehum units", "dehum_units")}
-                {propNumField("× days", "dehum_days")}
-                {propNumField("Drymatic boost units", "drymatic_units")}
-                {propNumField("× days", "drymatic_days")}
-                {propNumField("Drying mat units", "drying_mat_units")}
-                {propNumField("× days", "drying_mat_days")}
+                {propNumField(`AFD days (${equipTotals.totals.afd_count} placed)`, "afd_days")}
+                {propNumField(`Dehum days (${equipTotals.totals.dehumidifier_count} placed)`, "dehum_days")}
+                {propNumField(`Drymatic days (${equipTotals.totals.drymatic_boost_count} placed)`, "drymatic_days")}
+                {propNumField("DBKII days", "dbkii_days")}
+                {propNumField("Drying mats m²", "drying_mats_m2")}
                 {propNumField("Air mover units", "air_mover_units")}
                 {propNumField("× days", "air_mover_days")}
-                {propNumField("DBKII days", "dbkii_days")}
-                {propNumField("PRV areas", "prv_areas")}
+                {/* v7.0 item 3 — the entered number must match how PRV is priced: ALL sampled
+                    areas, outdoor control included */}
+                {propNumField("PRV areas — TOTAL sampled areas incl. the outdoor control (e.g. 6 indoor + 1 outdoor = enter 7)", "prv_areas")}
                 {propNumField("AC ducted decontamination", "ac_ducted_units")}
-                {propNumField("AC split decontamination", "ac_split_units")}
                 {propNumField("AC duct removal rooms", "ac_duct_removal_rooms")}
               </div>
+              {Object.keys(property).some((k) => k.startsWith("legacy_") && parseFloat(property[k]) > 0) && (
+                <div style={{ ...st.warn, fontSize: 11 }}>
+                  This job carries pre-v7.0 equipment unit counts ({Object.keys(property).filter((k) => k.startsWith("legacy_") && parseFloat(property[k]) > 0).map((k) => `${k.replace("legacy_", "")}=${property[k]}`).join(", ")}).
+                  They export under equipment_legacy with a hard ERROR until you place the equivalent markers / enter drying mats m² — then
+                  <button style={{ ...btn(false), marginLeft: 6, padding: "1px 6px", fontSize: 10.5 }}
+                    onClick={() => setProperty((p) => { const n = { ...p }; for (const k of Object.keys(n)) if (k.startsWith("legacy_")) delete n[k]; return n; })}>
+                    clear legacy counts
+                  </button>
+                </div>
+              )}
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 3 }}>
                 {propCheckField("Contents packout", "contents_packout")}
                 {propCheckField("Contents inventory", "contents_inventory")}
@@ -2053,7 +2503,9 @@ export default function App() {
           )}
         </div>
 
-        <div style={{ ...st.section, flex: 1, overflow: "auto" }}>
+        {/* v7.0 item 5 — no private scroll trap: the section flows like every other one and the
+            whole left bar is one continuous scroll, so nothing needs collapsing to be reached */}
+        <div style={st.section}>
           {sectionHead("qty", "5 · Quantities")}
           {!collapsed.qty && (
             <>
@@ -2122,15 +2574,31 @@ export default function App() {
                     </div>
                   )}
                   {propertyTotals.floorProt > 0 && qline("Floor protection", `${fmt(propertyTotals.floorProt)} m²`, "#9E9E9E")}
-                  {parseFloat(property.afd_units) > 0 && qline("AFD (air filtration devices)", `${property.afd_units} × ${property.afd_days || 0} days`)}
-                  {parseFloat(property.dehum_units) > 0 && qline("Dehumidifiers", `${property.dehum_units} × ${property.dehum_days || 0} days`)}
-                  {parseFloat(property.drymatic_units) > 0 && qline("Drymatic boost", `${property.drymatic_units} × ${property.drymatic_days || 0} days`)}
-                  {parseFloat(property.drying_mat_units) > 0 && qline("Drying mats", `${property.drying_mat_units} × ${property.drying_mat_days || 0} days`)}
+                  {/* v7.0 item 8 — totals are DERIVED from placed markers (sum of rooms) */}
+                  {equipTotals.totals.afd_count > 0 && qline("AFD (markers)", `${equipTotals.totals.afd_count} × ${property.afd_days || 0} days`)}
+                  {equipTotals.totals.dehumidifier_count > 0 && qline("Dehumidifiers (markers)", `${equipTotals.totals.dehumidifier_count} × ${property.dehum_days || 0} days`)}
+                  {equipTotals.totals.drymatic_boost_count > 0 && qline("Drymatic boost (markers)", `${equipTotals.totals.drymatic_boost_count} × ${property.drymatic_days || 0} days`)}
+                  {(equipTotals.totals.heat_mats_m2 > 0 || equipTotals.heatUnset > 0) && (
+                    <div style={{ ...st.qLine, color: equipTotals.heatUnset ? "#e86a6a" : undefined }}>
+                      <span style={{ ...st.swatch, background: equipTotals.heatUnset ? "#e86a6a" : "#8b909a" }} />
+                      <span style={{ flex: 1 }}>Heat mats{equipTotals.heatUnset ? ` — ${equipTotals.heatUnset} marker(s) NOT SET ⚠` : ""}</span>
+                      <span style={st.num}>{fmt(equipTotals.totals.heat_mats_m2)} m²</span>
+                    </div>
+                  )}
+                  {equipTotals.totals.split_ac_decon_insitu_count > 0 && qline("Split AC decon in-situ (markers)", equipTotals.totals.split_ac_decon_insitu_count)}
+                  {equipTotals.totals.split_ac_decommission_count > 0 && qline("Split AC decommission (markers)", equipTotals.totals.split_ac_decommission_count)}
+                  {equipTotals.unassigned > 0 && (
+                    <div style={{ ...st.qLine, color: "#e86a6a" }}>
+                      <span style={{ ...st.swatch, background: "#e86a6a" }} />
+                      <span style={{ flex: 1 }}>Markers with NO ROOM ⚠</span>
+                      <span style={st.num}>{equipTotals.unassigned}</span>
+                    </div>
+                  )}
+                  {parseFloat(property.drying_mats_m2) > 0 && qline("Drying mats", `${fmt(parseFloat(property.drying_mats_m2))} m²`)}
                   {parseFloat(property.air_mover_units) > 0 && qline("Air movers", `${property.air_mover_units} × ${property.air_mover_days || 0} days`)}
                   {parseFloat(property.dbkii_days) > 0 && qline("DBKII", `${property.dbkii_days} days`)}
-                  {parseFloat(property.prv_areas) > 0 && qline("PRV areas", property.prv_areas)}
+                  {parseFloat(property.prv_areas) > 0 && qline("PRV areas (incl. outdoor control)", property.prv_areas)}
                   {parseFloat(property.ac_ducted_units) > 0 && qline("AC ducted decontamination", property.ac_ducted_units)}
-                  {parseFloat(property.ac_split_units) > 0 && qline("AC split decontamination", property.ac_split_units)}
                   {parseFloat(property.ac_duct_removal_rooms) > 0 && qline("AC duct removal (rooms)", property.ac_duct_removal_rooms)}
                   {property.contents_packout && qline("Contents packout", "✓")}
                   {property.contents_inventory && qline("Contents inventory", "✓")}
@@ -2154,6 +2622,13 @@ export default function App() {
             disabled={!img || !shapes.some((s) => (s.floorId ?? activeFloor) === activeFloor)}
             title="Renders this floor's plan with every shape and a key, for a quote figure or ops handoff">
             Export scope image (PNG){floors.length > 1 && activeFloorRec?.name?.trim() ? ` — ${activeFloorRec.name.trim()}` : ""}
+          </button>
+          {/* v7.0 item 2 — one image per overlay + the combined; single-layer images don't
+              blend where fills overlap, and each legend matches exactly what its image shows */}
+          <button style={btn(false)} onClick={exportScopeImagesPerOverlay}
+            disabled={!img || (!shapes.some((s) => (s.floorId ?? activeFloor) === activeFloor) && !markers.some((m) => (m.floorId ?? activeFloor) === activeFloor))}
+            title="Downloads one PNG per overlay used on this floor (own shapes + own legend), plus the combined image">
+            Export scope images (per overlay)
           </button>
           <div style={st.row}>
             <button style={{ ...btn(false), flex: 1 }} onClick={exportProject} disabled={!shapes.length && !rooms.length}>
@@ -2204,6 +2679,19 @@ export default function App() {
                     {isSel && handlesOf(s).map((h, i) => (
                       <circle key={i} cx={h.x} cy={h.y} r={5 / zoom} fill="#fff" stroke="#2f6df6" strokeWidth={2 / zoom} />
                     ))}
+                  </g>
+                );
+              })}
+              {/* v7.0 item 8 — equipment markers: FIXED SCREEN SIZE (÷zoom), white disc behind
+                  so they stay readable over any fill colour, ring when selected */}
+              {markers.filter((m) => (m.floorId ?? activeFloor) === activeFloor && !hiddenRooms.has(m.room)).map((m) => {
+                const kind = markerKindById(m.kind); if (!kind) return null;
+                const ms = MARKER_SCREEN_PX / zoom;
+                const isSel = m.id === selMarkerId;
+                return (
+                  <g key={`mk-${m.id}`}>
+                    <circle cx={m.x} cy={m.y} r={ms / 2 + 2 / zoom} fill="#fff" stroke={isSel ? "#2f6df6" : "#333"} strokeWidth={(isSel ? 2.5 : 1) / zoom} />
+                    <image href={kind.icon} x={m.x - ms / 2} y={m.y - ms / 2} width={ms} height={ms} style={{ pointerEvents: "none" }} />
                   </g>
                 );
               })}
