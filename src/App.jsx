@@ -1308,7 +1308,10 @@ export default function App() {
         condition2_net_m2: round2(r.counts.condition2),
         condition2_m2: round2(r.counts.condition2),
         condition2_surface_m2: r.c2 ? r.c2.surface_m2 : 0,
-        condition2: r.c2 || null,
+        // null when NO C2 zone is drawn — the nested audit object must agree with the
+        // top-level 0, not carry a negative net the flat keys deny (found by the v7.0
+        // close-out review: t3 lounge showed top-level 0 with nested net_m2 -10.7).
+        condition2: r.c2 && r.c2.shapes.length ? r.c2 : null,
         cabinetry_face_m2: round2(r.counts.cabinetry),
         cabinetry_footprint_m2: round2(r.cabFootprint || 0),   // audit only — never priced
         cabinetry: r.cabWorking || null,

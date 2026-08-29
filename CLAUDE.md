@@ -52,7 +52,8 @@ where local fixture plans/exports go.
 - **Insulation:** `property.insulation_removal` is authoritative and already de-duplicated (union
   per floor per type). Per-room `insulation_batts_m2`/`insulation_blown_m2` are audit only.
 - **Legacy data is never silently dropped or silently converted.** Unmigratable values ride along
-  in the export with a hard ERROR flag (`roof_void_LEGACY_UNMIGRATED`, `equipment_legacy`).
+  in the export with a hard ERROR flag (export keys `property.roof_void_LEGACY_UNMIGRATED` /
+  `property.equipment_legacy`; flag codes `ROOF_VOID_UNMIGRATED` / `EQUIPMENT_LEGACY_COUNTS`).
 
 ## Browser-test harness (established pattern)
 
