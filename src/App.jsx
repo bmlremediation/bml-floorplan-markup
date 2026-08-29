@@ -70,10 +70,12 @@ const RETIRED_VOID_TYPES = new Set(["ceiling_void"]);
 const DEFAULT_PROPERTY = {
   // v7.0 (CO 2026-08-27 item 8): the equipment UNIT-COUNT inputs (afd_units, dehum_units,
   // drymatic_units, ac_split_units) are GONE — counts now come from placed markers. The ×days
-  // inputs stay (duration is job-level). drying_mat_units/days -> drying_mats_m2 (item 4:
-  // drying mats price per m², not per unit — so there is no days field for mats either).
+  // inputs stay (duration is job-level). drying_mat_units/days are DEAD (item 4), and the
+  // 27 Aug ADDENDUM removed the property drying-mats m² box too: mats area has exactly ONE
+  // entry point — heat_mats_m2 on the Drymatic Boost markers. Two entry points for the same
+  // physical product was confusing.
   afd_days: "", dehum_days: "", dbkii_days: "",
-  drymatic_days: "", drying_mats_m2: "",
+  drymatic_days: "",
   air_mover_units: "", air_mover_days: "",
   ac_ducted_units: "", ac_duct_removal_rooms: "", prv_areas: "",
   contents_packout: false, contents_inventory: false, skip_bin: false, asbestos_testing: false,
@@ -1281,7 +1283,7 @@ export default function App() {
       // BML_Markup_App_v5_0_MULTIFLOOR_PLAN.md §5 — note it drops the
       // "(bml-floorplan-quantify-quote)" qualifier that v4.x carried.
       markup_convention: "BML v7.0 — MULTI-FLOOR; C2 NETTED; INSULATION DE-DUPLICATED; EQUIPMENT MARKERS; FLOOR COVERINGS",
-      equipment_model: "v7.0 (CO 2026-08-27 item 8) — equipment counts come from PLACED MARKERS, per room. Each room carries split_ac_decon_insitu_count / split_ac_decommission_count / afd_count / dehumidifier_count / drymatic_boost_count / heat_mats_m2; property carries the TOTALS (sum of rooms) under the same names. LEGACY ALIASES: property.afd_units, dehum_units, drymatic_units, ac_split_units are now DERIVED from marker totals (afd_units=afd_count, dehum_units=dehumidifier_count, drymatic_units=drymatic_boost_count, ac_split_units=split_ac_decon_insitu_count) so pre-v7 consumers keep reading a number — update to the *_count keys. The ×days inputs remain property-level (equipment duration is job-level). drying_mat_units/drying_mat_days are DEAD: drying mats price per m² and export as property.drying_mats_m2. A job saved before v7.0 that still carries old unit counts exports them under property.equipment_legacy with a hard flag — they are never silently dropped and never silently converted (counts have no positions; units are not m²).",
+      equipment_model: "v7.0 (CO 2026-08-27 item 8) — equipment counts come from PLACED MARKERS, per room. Each room carries split_ac_decon_insitu_count / split_ac_decommission_count / afd_count / dehumidifier_count / drymatic_boost_count / heat_mats_m2; property carries the TOTALS (sum of rooms) under the same names. LEGACY ALIASES: property.afd_units, dehum_units, drymatic_units, ac_split_units are now DERIVED from marker totals (afd_units=afd_count, dehum_units=dehumidifier_count, drymatic_units=drymatic_boost_count, ac_split_units=split_ac_decon_insitu_count) so pre-v7 consumers keep reading a number — update to the *_count keys. The ×days inputs remain property-level (equipment duration is job-level). drying_mat_units/drying_mat_days are DEAD, and per the 27 Aug addendum the property-level mats m² input is gone too: drying/heat mats area rides ONLY on Drymatic Boost markers as heat_mats_m2 (property.drying_mats_m2 is DEPRECATED and always 0). A job saved before v7.0 that still carries old unit counts exports them under property.equipment_legacy with a hard flag — they are never silently dropped and never silently converted (counts have no positions; units are not m²).",
       insulation_model: "v6.0 — INSULATION REMOVAL IS DE-DUPLICATED. Both a strip-ceiling shape and a roof-void shape can carry an insulation-removal flag, and they routinely cover the SAME void from two directions. property.insulation_removal is the AUTHORITATIVE, already-netted figure: the geometric UNION per floor and per type, with near-coincident edges snapped first. PRICE total_m2 / batts_m2 / blown_in_m2 FROM THERE. The per-room insulation_batts_m2 / insulation_blown_m2 exist ONLY on void rooms and are kept for audit ONLY: they omit every insulation-flagged strip-ceiling shape outside a void room (so summing them UNDER-charges), and within one void room they are a plain per-shape sum (so overlapping shapes there OVER-charge). Never derive insulation from them. total_m2 is the union of ALL insulation shapes and can never be overstated; where the two TYPES overlap the batts/blown split is unreliable and a hard ERROR flag says so, because the same square metre cannot have both removed. v6.0 also RETIRES ceiling_void as a room type: a ceiling void between storeys is scoped with the strip-ceiling shape and its insulation option, not as its own room. Only roof_void remains, and a roof-void shape is bound to a roof-void room by void_type — never by room name.",
       multifloor_model: "v5.0 — a job has FLOORS. floors[] carries each floor's own calibration; every room carries `floor` (the floor's TYPED label, never invented by the app — it may be \"\" if unlabelled) and `void_type`. PROPERTY SCOPE IS ENTERED ONCE PER JOB and is therefore already a combined total across every floor, including floor_protection_m2 — there is nothing to merge or de-duplicate, and a consumer must NOT attempt to. VOID ROOMS: void_type is `ceiling_void` (between an upper and a lower floor) or `roof_void` (between the top floor and the roof), and is ALWAYS an explicit human selection. Key off void_type ONLY — NEVER off the room name, which is free text: a room named \"understair void\" with void_type null is an ORDINARY room and is flagged, not reinterpreted. A void room carries decon_m2 + insulation_batts_m2 + insulation_blown_m2 + void_decon{} and is otherwise an ordinary room (own ceiling height, containment, strip). property.roof_void is GONE unless a legacy job still has roof-void shapes outside a void room, in which case it is present AND a hard ERROR flag is raised — never silently dropped.",
       condition2_model: "v5.0 — condition2_net_m2 is the PRICED figure and it is ALREADY NETTED. SURFACE: all Condition 2 shapes in a room are UNIONED (with near-coincident edges snapped within ~25 mm first, because shapes drawn by hand to abut are never numerically coincident — measured 12.9 mm and 19.3 mm on real markup — and an un-snapped union keeps the internal wall it exists to remove), then surface = 2 x union_area + union_perimeter x ceiling_height. Floor and ceiling are AREAS (2 x union area); walls are PERIMETER x height. The earlier footprint x (2 + H) form is DEAD: it multiplied the floor AREA by the height to get the wall term, which is only correct in a 4 x 4 m room — it under-read small rooms (1x1: -62%) and over-read large ones (10x10: +49%). NET: surface minus (wall_strip + ceiling_strip + floor_strip), because a stripped surface is already paid for twice (strip rate + cavity remediation) and must not be charged a third time as a Condition 2 clean. A per-shape height override (c2H) puts a shape in its own height group for double-height stairwells and raked ceilings. condition2_m2 is an ALIAS OF THE NET so no consumer can accidentally read the gross; the gross is condition2_surface_m2 (audit only). 'Full strip' no longer exists — floor_strip and ceiling_strip are separate overlays.",
@@ -1368,8 +1370,10 @@ export default function App() {
         dehum_days: parseFloat(property.dehum_days) || 0,
         dbkii_days: parseFloat(property.dbkii_days) || 0,
         drymatic_days: parseFloat(property.drymatic_days) || 0,
-        // v7.0 item 4 — drying mats price per m², not per unit. drying_mat_units/days are DEAD.
-        drying_mats_m2: parseFloat(property.drying_mats_m2) || 0,
+        // v7.0 item 4 + 27 Aug ADDENDUM — drying_mat_units/days are DEAD, and the property
+        // m² box is gone too: mats area rides ONLY on Drymatic markers (heat_mats_m2). This
+        // key is DEPRECATED and always 0; the engine ignores it and CONFIRMs on non-zero.
+        drying_mats_m2: 0,
         air_mover_units: parseFloat(property.air_mover_units) || 0, air_mover_days: parseFloat(property.air_mover_days) || 0,
         ac_ducted_units: parseFloat(property.ac_ducted_units) || 0,
         ac_duct_removal_rooms: parseFloat(property.ac_duct_removal_rooms) || 0,
@@ -2017,7 +2021,7 @@ export default function App() {
   const equipTotals = computeEquipment();
   const anyPropertyEntered = propertyTotals.decon_m2 > 0 || insulationTotals.total_m2 > 0 ||
     propertyTotals.floorProt > 0 || equipTotals.any ||
-    parseFloat(property.drying_mats_m2) > 0 || parseFloat(property.air_mover_units) > 0 ||
+    parseFloat(property.air_mover_units) > 0 ||
     parseFloat(property.dbkii_days) > 0 || parseFloat(property.ac_ducted_units) > 0 ||
     parseFloat(property.ac_duct_removal_rooms) > 0 ||
     parseFloat(property.prv_areas) > 0 || property.contents_packout || property.contents_inventory ||
@@ -2465,7 +2469,6 @@ export default function App() {
                 {propNumField(`Dehum days (${equipTotals.totals.dehumidifier_count} placed)`, "dehum_days")}
                 {propNumField(`Drymatic days (${equipTotals.totals.drymatic_boost_count} placed)`, "drymatic_days")}
                 {propNumField("DBKII days", "dbkii_days")}
-                {propNumField("Drying mats m²", "drying_mats_m2")}
                 {propNumField("Air mover units", "air_mover_units")}
                 {propNumField("× days", "air_mover_days")}
                 {/* v7.0 item 3 — the entered number must match how PRV is priced: ALL sampled
@@ -2597,7 +2600,6 @@ export default function App() {
                       <span style={st.num}>{equipTotals.unassigned}</span>
                     </div>
                   )}
-                  {parseFloat(property.drying_mats_m2) > 0 && qline("Drying mats", `${fmt(parseFloat(property.drying_mats_m2))} m²`)}
                   {parseFloat(property.air_mover_units) > 0 && qline("Air movers", `${property.air_mover_units} × ${property.air_mover_days || 0} days`)}
                   {parseFloat(property.dbkii_days) > 0 && qline("DBKII", `${property.dbkii_days} days`)}
                   {parseFloat(property.prv_areas) > 0 && qline("PRV areas (incl. outdoor control)", property.prv_areas)}
