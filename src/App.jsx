@@ -135,7 +135,14 @@ const MARKER_KINDS = [
   { id: "drymatic_boost",        label: "Drymatic boost",                    icon: iconDrymatic,      exportKey: "drymatic_boost_count",        legacyAlias: "drymatic_units", hasHeatMats: true },
 ];
 const markerKindById = (id) => MARKER_KINDS.find((k) => k.id === id);
-const MARKER_SCREEN_PX = 26;   // rendered size in SCREEN pixels — constant regardless of zoom
+// v7.3 — markers have a fixed PLAN size, not a fixed screen size. v7.0 rendered them at 26
+// screen px, so zooming out on a large plan made them swallow rooms and walls, and the export
+// sized them off the image width (worse again). A marker now occupies MARKER_SIZE_M of real
+// floor via the floor's calibration — it scales exactly like the rooms it sits in, on screen
+// and in every exported image. Uncalibrated floors fall back to a fixed image-pixel size.
+const MARKER_SIZE_M = 0.6;
+const MARKER_FALLBACK_PX = 40;
+const MARKER_MIN_SCREEN_PX = 14;   // never smaller than this on screen — stays clickable when zoomed far out
 
 // ---------- v5.0 multi-floor data model (phase 1) ----------
 // FLAT ARRAYS WITH A FLOOR TAG, never nested floors. rooms[] and shapes[] stay single flat
@@ -175,7 +182,7 @@ function migrateFloors(d) {
   };
 }
 
-const APP_VERSION = "v7.2";
+const APP_VERSION = "v7.3";
 // v7.1 — remember cosmetic panel state per browser (collapsed sections, last category, covering
 // default). Never job data — that lives in IndexedDB. Any failure falls back to defaults.
 const UI_PREFS_KEY = "bml-markup-ui-prefs-v1";
@@ -797,9 +804,14 @@ export default function App() {
   const isTyping = (e) => ["INPUT", "TEXTAREA", "SELECT"].includes(e.target.tagName);
 
   // hit tests
-  // v7.0 — markers render at MARKER_SCREEN_PX regardless of zoom, so the hit radius is the
-  // same constant converted into image coordinates.
-  const hitMarker = (m, p) => Math.hypot(p.x - m.x, p.y - m.y) < (MARKER_SCREEN_PX / 2 + 4) / zoom;
+  // v7.3 — marker size in IMAGE px from the floor's scale (fixed real-world footprint), with a
+  // screen-px floor so a far-zoomed-out marker is still visible and clickable.
+  const markerSizePx = (m) => {
+    const sc = scaleOf(m);
+    const planPx = sc ? MARKER_SIZE_M / sc : MARKER_FALLBACK_PX;
+    return Math.max(planPx, MARKER_MIN_SCREEN_PX / zoom);
+  };
+  const hitMarker = (m, p) => Math.hypot(p.x - m.x, p.y - m.y) < markerSizePx(m) / 2 + 4 / zoom;
   const hitShape = (s, p) => {
     const t = 6 / zoom;
     if (s.type === "rect") return p.x >= s.x - t && p.x <= s.x + s.w + t && p.y >= s.y - t && p.y <= s.y + s.h + t;
@@ -1677,9 +1689,12 @@ export default function App() {
         }
       }
       // v7.0 item 8 — equipment markers, sized relative to the plan (not the on-screen constant)
-      const ms = Math.round(fs * 2.2);
+      // v7.3 — same real-world footprint as on the canvas (no screen-px floor here: the export is
+      // the plan at full resolution, so the plan-size marker is always legible)
       for (const m of fMarkers) {
         const el = iconEls[m.kind]; if (!el) continue;
+        const sc = scaleOf(m);
+        const ms = Math.round(sc ? MARKER_SIZE_M / sc : MARKER_FALLBACK_PX);
         g.fillStyle = "#ffffff";
         g.beginPath(); g.arc(m.x, m.y, ms / 2 + Math.max(2, fs / 8), 0, Math.PI * 2); g.fill();
         g.strokeStyle = "#333"; g.lineWidth = Math.max(1, fs / 14); g.stroke();
@@ -2782,7 +2797,7 @@ export default function App() {
                   so they stay readable over any fill colour, ring when selected */}
               {markers.filter((m) => (m.floorId ?? activeFloor) === activeFloor && !hiddenRooms.has(m.room)).map((m) => {
                 const kind = markerKindById(m.kind); if (!kind) return null;
-                const ms = MARKER_SCREEN_PX / zoom;
+                const ms = markerSizePx(m);
                 const isSel = m.id === selMarkerId;
                 const dim = isolate && activeRoom != null && m.room !== activeRoom;
                 const mRoom = rooms.find((r) => r.id === m.room);
