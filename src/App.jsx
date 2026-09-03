@@ -175,7 +175,7 @@ function migrateFloors(d) {
   };
 }
 
-const APP_VERSION = "v7.1";
+const APP_VERSION = "v7.2";
 // v7.1 — remember cosmetic panel state per browser (collapsed sections, last category, covering
 // default). Never job data — that lives in IndexedDB. Any failure falls back to defaults.
 const UI_PREFS_KEY = "bml-markup-ui-prefs-v1";
@@ -1960,13 +1960,13 @@ export default function App() {
   // under both mechanisms; the attribution is now the true one. Deviation logged for the PRC.
   const instructionsBody = (
     <>
-      <div style={st.meta}><strong style={{ color: "#e8e6e1" }}>Condition 2 (blue):</strong> C2 zone total = gross floor + ceiling + walls of the drawn zone. Do NOT try to exclude strip-out areas from the zone — stripped surfaces are subtracted automatically (the app nets them out of the exported C2 figure; the pricing engine asserts that netted figure, prices strip areas at strip rates and only the REMAINDER at decon rates). Drawing around strip areas double-nets and under-prices the decon. Part-room zones are fine.</div>
-      <div style={st.meta}><strong style={{ color: "#e8e6e1" }}>Spot cuts:</strong> draw the ACTUAL cutout area (incl. your strip-past-contamination allowance) — quantities price what you draw.</div>
-      <div style={st.meta}><strong style={{ color: "#e8e6e1" }}>Selecting:</strong> click again on overlapping shapes (same spot) to select the one underneath — cycles through the stack. Shift = straight lines · Del = delete selected · Ctrl+Z = undo · scroll = zoom · space-drag = pan.</div>
-      <div style={st.meta}><strong style={{ color: "#e8e6e1" }}>Floor strip:</strong> every floor-strip shape needs its floor covering selected — the strip rate depends on it and the export hard-errors without it.</div>
-      <div style={st.meta}><strong style={{ color: "#e8e6e1" }}>Equipment:</strong> place icon markers on the plan (section 3), tagged to the active room — counts export per room. Drymatic markers also need heat mats m². Days are entered once, in Property scope.</div>
-      <div style={st.meta}><strong style={{ color: "#e8e6e1" }}>Floors:</strong> each floor has its OWN plan image and calibration. Labels are yours — the app never names a floor. Roof-void shapes bind to a roof void room; a ceiling void between storeys is scoped with strip-ceiling + its insulation option.</div>
-      <div style={st.meta}><strong style={{ color: "#e8e6e1" }}>Never priced here:</strong> this tool exports quantities only — rates and pricing live in the engine.</div>
+      <div style={st.meta}><strong style={{ color: "#1b1e24" }}>Condition 2 (blue):</strong> C2 zone total = gross floor + ceiling + walls of the drawn zone. Do NOT try to exclude strip-out areas from the zone — stripped surfaces are subtracted automatically (the app nets them out of the exported C2 figure; the pricing engine asserts that netted figure, prices strip areas at strip rates and only the REMAINDER at decon rates). Drawing around strip areas double-nets and under-prices the decon. Part-room zones are fine.</div>
+      <div style={st.meta}><strong style={{ color: "#1b1e24" }}>Spot cuts:</strong> draw the ACTUAL cutout area (incl. your strip-past-contamination allowance) — quantities price what you draw.</div>
+      <div style={st.meta}><strong style={{ color: "#1b1e24" }}>Selecting:</strong> click again on overlapping shapes (same spot) to select the one underneath — cycles through the stack. Shift = straight lines · Del = delete selected · Ctrl+Z = undo · scroll = zoom · space-drag = pan.</div>
+      <div style={st.meta}><strong style={{ color: "#1b1e24" }}>Floor strip:</strong> every floor-strip shape needs its floor covering selected — the strip rate depends on it and the export hard-errors without it.</div>
+      <div style={st.meta}><strong style={{ color: "#1b1e24" }}>Equipment:</strong> place icon markers on the plan (section 3), tagged to the active room — counts export per room. Drymatic markers also need heat mats m². Days are entered once, in Property scope.</div>
+      <div style={st.meta}><strong style={{ color: "#1b1e24" }}>Floors:</strong> each floor has its OWN plan image and calibration. Labels are yours — the app never names a floor. Roof-void shapes bind to a roof void room; a ceiling void between storeys is scoped with strip-ceiling + its insulation option.</div>
+      <div style={st.meta}><strong style={{ color: "#1b1e24" }}>Never priced here:</strong> this tool exports quantities only — rates and pricing live in the engine.</div>
     </>
   );
 
@@ -2056,7 +2056,7 @@ export default function App() {
                 <div style={st.meta}>Saved {new Date(j.savedAt).toLocaleString("en-AU")}</div>
               </div>
               <button style={btn(false)} onClick={() => openJob(j.id)}>Open</button>
-              <button style={{ ...btn(false), color: "#e86a6a" }} onClick={() => deleteJob(j.id)}>Delete</button>
+              <button style={{ ...btn(false), color: "#c62828" }} onClick={() => deleteJob(j.id)}>Delete</button>
             </div>
           ))}
           {busy && <div style={st.meta}>Loading…</div>}
@@ -2092,7 +2092,7 @@ export default function App() {
       <div style={st.panel}>
         <div style={{ ...st.row, justifyContent: "space-between" }}>
           <span style={{ ...st.brand, cursor: "pointer" }} onClick={() => { persistMeta(); listJobs().then(setIndex); setView("home"); }}>← JOBS</span>
-          <span style={{ ...st.meta, color: saveState === "error" ? "#e86a6a" : "#8b909a" }}>{saveLabel}</span>
+          <span style={{ ...st.meta, color: saveState === "error" ? "#c62828" : "#5b6270" }}>{saveLabel}</span>
         </div>
         {!storageOk && <div style={st.warn}>No persistence in this browser — export project JSON before closing.</div>}
 
@@ -2115,9 +2115,9 @@ export default function App() {
                 <input value={f.name} onClick={(e) => e.stopPropagation()}
                   placeholder="label… (e.g. G / L1 / L2)"
                   onChange={(e) => renameFloor(f.id, e.target.value)}
-                  style={{ flex: 1, minWidth: 0, background: "transparent", border: "none", borderBottom: "1px dashed #6a7180", color: "#e8e6e1", fontSize: 13, padding: "2px 0" }} />
+                  style={{ flex: 1, minWidth: 0, background: "transparent", border: "none", borderBottom: "1px dashed #9aa3b0", color: "#1b1e24", fontSize: 13, padding: "2px 0" }} />
                 <span style={{ ...st.meta, fontSize: 10 }} title="rooms · shapes on this floor">{nR}r·{nS}s</span>
-                {!f.scale && (nR > 0 || nS > 0) && <span title="This floor is not calibrated — its quantities are invalid" style={{ color: "#e8b34b", fontSize: 11 }}>⚠</span>}
+                {!f.scale && (nR > 0 || nS > 0) && <span title="This floor is not calibrated — its quantities are invalid" style={{ color: "#b7791f", fontSize: 11 }}>⚠</span>}
                 <span title="Move up" style={{ cursor: "pointer", opacity: i === 0 ? 0.25 : 0.7 }}
                   onClick={(e) => { e.stopPropagation(); moveFloor(f.id, -1); }}>▲</span>
                 <span title="Move down" style={{ cursor: "pointer", opacity: i === floors.length - 1 ? 0.25 : 0.7 }}
@@ -2160,7 +2160,7 @@ export default function App() {
               <div style={st.meta}>
                 {scale
                   ? <>Scale locked: 1 px = {fmt(scale * 1000, 1)} mm. Cross-check with Measure before drawing.</>
-                  : <span style={{ color: "#e8b34b" }}>Not calibrated — quantities disabled.</span>}
+                  : <span style={{ color: "#b7791f" }}>Not calibrated — quantities disabled.</span>}
               </div>
               <button style={btn(tool === "measure")} onClick={() => setTool("measure")} disabled={!scale}>
                 Measure (check tool){measure && scale ? ` — ${fmt(measLen * scale)} m` : ""}
@@ -2193,7 +2193,7 @@ export default function App() {
               {rooms.filter((r) => (r.floorId ?? activeFloor) === activeFloor).map((r) => {
                 const mk = markers.filter((m) => m.room === r.id).length;
                 const upd = (patch) => setRooms((a) => a.map((x) => x.id === r.id ? { ...x, ...patch } : x));
-                const tiny = { display: "flex", alignItems: "center", gap: 3, fontSize: 10.5, color: "#a7adb8" };
+                const tiny = { display: "flex", alignItems: "center", gap: 3, fontSize: 10.5, color: "#5b6270" };
                 return (
                   <div key={r.id} style={{ ...st.roomRow, flexDirection: "column", alignItems: "stretch", gap: 5,
                       outline: activeRoom === r.id ? "1px solid #6ea8fe" : "none", opacity: hiddenRooms.has(r.id) ? 0.55 : 1 }}
@@ -2201,7 +2201,7 @@ export default function App() {
                     <div style={st.row}>
                       <input value={r.name} onClick={(e) => e.stopPropagation()} placeholder="room name"
                         onChange={(e) => upd({ name: e.target.value })}
-                        style={{ flex: 1, minWidth: 80, background: "transparent", border: "none", borderBottom: "1px dashed #6a7180", color: "#e8e6e1", fontSize: 13, padding: "2px 0" }} />
+                        style={{ flex: 1, minWidth: 80, background: "transparent", border: "none", borderBottom: "1px dashed #9aa3b0", color: "#1b1e24", fontSize: 13, padding: "2px 0" }} />
                       {r.void_type && (
                         <span title={`Exported as void_type "${r.void_type}" — the engine keys off this, not the name`}
                           style={{ fontSize: 9.5, padding: "1px 4px", borderRadius: 3, background: "#795548", color: "#fff", whiteSpace: "nowrap" }}>
@@ -2264,7 +2264,7 @@ export default function App() {
                       {FLOOR_COVERINGS.map((c) => <option key={c.value} value={c.value}>{c.label}</option>)}
                     </select>
                   </div>
-                  {!floorCov && <div style={{ ...st.meta, color: "#e8b34b" }}>No covering selected — new shapes will need one set before export (the strip rate depends on it).</div>}
+                  {!floorCov && <div style={{ ...st.meta, color: "#b7791f" }}>No covering selected — new shapes will need one set before export (the strip rate depends on it).</div>}
                 </div>
               )}
               {activeCat === "wall_strip" && (
@@ -2305,7 +2305,7 @@ export default function App() {
                     <div style={{ ...st.meta, fontSize: 11 }}>
                       {roofVoidRoomsHere.length === 1
                         ? <>Binds to roof void room <strong>{roofVoidRoomsHere[0].name}</strong>.</>
-                        : <span style={{ color: "#e8b34b" }}>No roof void room on this floor — drawing will offer to create one.</span>}
+                        : <span style={{ color: "#b7791f" }}>No roof void room on this floor — drawing will offer to create one.</span>}
                     </div>
                   )}
                 </div>
@@ -2341,7 +2341,7 @@ export default function App() {
                       <input style={{ ...st.input, flex: 1 }} value={cabHgtCustom} onChange={(e) => setCabHgtCustom(e.target.value)} inputMode="decimal" />
                     </div>
                   )}
-                  {!cabHgt && <div style={{ ...st.meta, color: "#e8b34b" }}>No height selected — new shapes will need one set before export (face area cannot price a footprint).</div>}
+                  {!cabHgt && <div style={{ ...st.meta, color: "#b7791f" }}>No height selected — new shapes will need one set before export (face area cannot price a footprint).</div>}
                 </div>
               )}
               {/* v7.0 item 8 — equipment markers: pick a kind, click the plan to place. Fixed-size
@@ -2349,7 +2349,7 @@ export default function App() {
               <div style={{ ...st.meta, marginTop: 4 }}>Equipment markers (click plan to place — tagged to the active room):</div>
               <div style={st.chips}>
                 {MARKER_KINDS.map((k) => (
-                  <button key={k.id} style={chip({ color: "#8b909a" }, tool === "marker" && activeMarkerKind === k.id)}
+                  <button key={k.id} style={chip({ color: "#5b6270" }, tool === "marker" && activeMarkerKind === k.id)}
                     onClick={() => { setActiveMarkerKind(k.id); setTool("marker"); }} disabled={!img}
                     title={k.label}>
                     <img src={k.icon} alt="" style={{ width: 16, height: 16 }} />
@@ -2429,7 +2429,7 @@ export default function App() {
                               onChange={(e) => { pushUndo(); const v = e.target.value; setShapes((a) => a.map((s) => s.id === sel.id ? { ...s, cabH: v } : s)); }} inputMode="decimal" />
                           </div>
                         )}
-                        {!sel.cabH && <div style={{ ...st.meta, color: "#e8b34b" }}>No height set — this shape exports as a hard ERROR (face area cannot price a footprint).</div>}
+                        {!sel.cabH && <div style={{ ...st.meta, color: "#b7791f" }}>No height set — this shape exports as a hard ERROR (face area cannot price a footprint).</div>}
                       </>
                     );
                   })()}
@@ -2451,7 +2451,7 @@ export default function App() {
                           {FLOOR_COVERINGS.map((c) => <option key={c.value} value={c.value}>{c.label}</option>)}
                         </select>
                       </div>
-                      {!sel.floorCov && <div style={{ ...st.meta, color: "#e8b34b" }}>No covering set — this shape exports as a hard ERROR (the strip rate depends on it).</div>}
+                      {!sel.floorCov && <div style={{ ...st.meta, color: "#b7791f" }}>No covering set — this shape exports as a hard ERROR (the strip rate depends on it).</div>}
                     </>
                   )}
                   {/* v7.0 item 9 — optional zone id so a multi-room containment zone exports as
@@ -2493,7 +2493,7 @@ export default function App() {
                           <input style={{ ...st.input, flex: 1 }} value={selMarker.heatMatsM2 ?? ""} inputMode="decimal"
                             onChange={(e) => { pushUndo(); const v = e.target.value; setMarkers((a) => a.map((m) => m.id === selMarker.id ? { ...m, heatMatsM2: v } : m)); }} />
                         </div>
-                        {!(parseFloat(selMarker.heatMatsM2) > 0) && <div style={{ ...st.meta, color: "#e8b34b" }}>Heat mats m² is required — blank exports a hard ERROR and contributes zero.</div>}
+                        {!(parseFloat(selMarker.heatMatsM2) > 0) && <div style={{ ...st.meta, color: "#b7791f" }}>Heat mats m² is required — blank exports a hard ERROR and contributes zero.</div>}
                       </>
                     )}
                     <div style={st.row}>
@@ -2580,13 +2580,13 @@ export default function App() {
           {sectionHead("checks", `Checks — ${liveErrors} error${liveErrors === 1 ? "" : "s"}, ${liveFlags.length - liveErrors} flag${liveFlags.length - liveErrors === 1 ? "" : "s"}`)}
           {!collapsed.checks && (
             liveFlags.length === 0
-              ? <div style={{ ...st.meta, color: "#6fbf73" }}>No errors or flags — the export will be clean.</div>
+              ? <div style={{ ...st.meta, color: "#2e7d32" }}>No errors or flags — the export will be clean.</div>
               : liveFlags.map((f, i) => (
                 <div key={`${f.code}-${i}`} onClick={() => focusFlag(f)} title={`${f.code}${f.room || f.floor ? " — click to focus" : ""}`}
                   style={{ ...st.meta, cursor: f.room || f.floor ? "pointer" : "default", padding: "5px 7px", borderRadius: 5,
-                    background: f.severity === "ERROR" ? "#2a1717" : "#2a2415",
-                    borderLeft: `3px solid ${f.severity === "ERROR" ? "#e86a6a" : "#e8b34b"}`, color: "#e8e6e1", fontSize: 11 }}>
-                  <span style={{ fontFamily: "ui-monospace, monospace", fontSize: 10, color: f.severity === "ERROR" ? "#e86a6a" : "#e8b34b" }}>{f.severity} · {f.code}</span>
+                    background: f.severity === "ERROR" ? "#fdecec" : "#fff5dc",
+                    borderLeft: `3px solid ${f.severity === "ERROR" ? "#c62828" : "#b7791f"}`, color: "#1b1e24", fontSize: 11 }}>
+                  <span style={{ fontFamily: "ui-monospace, monospace", fontSize: 10, color: f.severity === "ERROR" ? "#c62828" : "#b7791f" }}>{f.severity} · {f.code}</span>
                   <div>{f.message.replace(/^(ERROR|FLAG) — /, "")}</div>
                 </div>
               ))
@@ -2604,7 +2604,7 @@ export default function App() {
                 const rows = roomRows().filter((r) => r.any || !r.isUnassigned);
                 const renderRow = (r) => (
                   <div key={`${r.floorId || "none"}-${r.name}`} style={st.qRoom}>
-                    <div style={{ fontWeight: 600, color: r.isUnassigned && r.any ? "#e8b34b" : "#e8e6e1" }}>
+                    <div style={{ fontWeight: 600, color: r.isUnassigned && r.any ? "#b7791f" : "#1b1e24" }}>
                       {r.name}{r.isUnassigned && r.any ? " ⚠" : ""}
                       {r.voidType && (
                         <span style={{ marginLeft: 4, fontSize: 9.5, padding: "1px 4px", borderRadius: 3, background: "#795548", color: "#fff" }}>
@@ -2613,7 +2613,7 @@ export default function App() {
                       )}
                       {r.chSet
                         ? <span style={st.meta}> CH {r.ch} m</span>
-                        : <span style={{ ...st.meta, color: "#e8b34b" }}> CH not set — using 2.4 ⚠</span>}
+                        : <span style={{ ...st.meta, color: "#b7791f" }}> CH not set — using 2.4 ⚠</span>}
                     </div>
                     {(r.plumbIso || r.elecIso) && (
                       <div style={{ ...st.meta, fontSize: 11 }}>
@@ -2621,8 +2621,8 @@ export default function App() {
                       </div>
                     )}
                     {CATS.map((c) => categoryLines(c, r).map((line, i) => (
-                      <div key={`${c.id}-${i}`} style={{ ...st.qLine, color: line.danger ? "#e86a6a" : undefined, fontSize: line.sub ? 11 : st.qLine.fontSize, opacity: line.sub ? 0.75 : 1 }}>
-                        <span style={{ ...st.swatch, background: line.danger ? "#e86a6a" : c.color }} />
+                      <div key={`${c.id}-${i}`} style={{ ...st.qLine, color: line.danger ? "#c62828" : undefined, fontSize: line.sub ? 11 : st.qLine.fontSize, opacity: line.sub ? 0.75 : 1 }}>
+                        <span style={{ ...st.swatch, background: line.danger ? "#c62828" : c.color }} />
                         <span style={{ flex: 1 }}>{line.label}</span>
                         <span style={st.num}>{line.text}</span>
                       </div>
@@ -2635,7 +2635,7 @@ export default function App() {
                   const fr = rows.filter((r) => r.floorId === f.id);
                   if (!fr.length) continue;
                   out.push(
-                    <div key={`fh-${f.id}`} style={{ ...st.h, marginTop: 6, color: f.name?.trim() ? "#8b909a" : "#e8b34b" }}>
+                    <div key={`fh-${f.id}`} style={{ ...st.h, marginTop: 6, color: f.name?.trim() ? "#5b6270" : "#b7791f" }}>
                       {f.name?.trim() || "(UNLABELLED FLOOR ⚠)"}
                     </div>
                   );
@@ -2643,7 +2643,7 @@ export default function App() {
                 }
                 const orphans = rows.filter((r) => !r.floorId);
                 if (orphans.length) {
-                  out.push(<div key="fh-none" style={{ ...st.h, marginTop: 6, color: "#e8b34b" }}>UNASSIGNED</div>);
+                  out.push(<div key="fh-none" style={{ ...st.h, marginTop: 6, color: "#b7791f" }}>UNASSIGNED</div>);
                   out.push(...orphans.map(renderRow));
                 }
                 return out;
@@ -2657,8 +2657,8 @@ export default function App() {
                   {insulationTotals.batts_m2 > 0 && qline(`Insulation removal (batts)${insulationTotals.overlap_netted ? " — netted" : ""}`, `${fmt(insulationTotals.batts_m2)} m²`, "#795548")}
                   {insulationTotals.blown_in_m2 > 0 && qline(`Insulation removal (blown-in)${insulationTotals.overlap_netted ? " — netted" : ""}`, `${fmt(insulationTotals.blown_in_m2)} m²`, "#795548")}
                   {insulationTotals.cross_type_overlap && (
-                    <div style={{ ...st.qLine, color: "#e86a6a" }}>
-                      <span style={{ ...st.swatch, background: "#e86a6a" }} />
+                    <div style={{ ...st.qLine, color: "#c62828" }}>
+                      <span style={{ ...st.swatch, background: "#c62828" }} />
                       <span style={{ flex: 1 }}>Batts and blown-in OVERLAP ⚠</span>
                       <span style={st.num}>split unreliable</span>
                     </div>
@@ -2669,8 +2669,8 @@ export default function App() {
                   {equipTotals.totals.dehumidifier_count > 0 && qline("Dehumidifiers (markers)", `${equipTotals.totals.dehumidifier_count} × ${property.dehum_days || 0} days`)}
                   {equipTotals.totals.drymatic_boost_count > 0 && qline("Drymatic boost (markers)", `${equipTotals.totals.drymatic_boost_count} × ${property.drymatic_days || 0} days`)}
                   {(equipTotals.totals.heat_mats_m2 > 0 || equipTotals.heatUnset > 0) && (
-                    <div style={{ ...st.qLine, color: equipTotals.heatUnset ? "#e86a6a" : undefined }}>
-                      <span style={{ ...st.swatch, background: equipTotals.heatUnset ? "#e86a6a" : "#8b909a" }} />
+                    <div style={{ ...st.qLine, color: equipTotals.heatUnset ? "#c62828" : undefined }}>
+                      <span style={{ ...st.swatch, background: equipTotals.heatUnset ? "#c62828" : "#5b6270" }} />
                       <span style={{ flex: 1 }}>Heat mats{equipTotals.heatUnset ? ` — ${equipTotals.heatUnset} marker(s) NOT SET ⚠` : ""}</span>
                       <span style={st.num}>{fmt(equipTotals.totals.heat_mats_m2)} m²</span>
                     </div>
@@ -2678,8 +2678,8 @@ export default function App() {
                   {equipTotals.totals.split_ac_decon_insitu_count > 0 && qline("Split AC decon in-situ (markers)", equipTotals.totals.split_ac_decon_insitu_count)}
                   {equipTotals.totals.split_ac_decommission_count > 0 && qline("Split AC decommission (markers)", equipTotals.totals.split_ac_decommission_count)}
                   {equipTotals.unassigned > 0 && (
-                    <div style={{ ...st.qLine, color: "#e86a6a" }}>
-                      <span style={{ ...st.swatch, background: "#e86a6a" }} />
+                    <div style={{ ...st.qLine, color: "#c62828" }}>
+                      <span style={{ ...st.swatch, background: "#c62828" }} />
                       <span style={{ flex: 1 }}>Markers with NO ROOM ⚠</span>
                       <span style={st.num}>{equipTotals.unassigned}</span>
                     </div>
@@ -2703,7 +2703,7 @@ export default function App() {
 
         <div style={st.section}>
           {liveFlags.length > 0 && (
-            <div style={{ ...st.meta, color: liveErrors ? "#e86a6a" : "#e8b34b", fontSize: 11 }}>
+            <div style={{ ...st.meta, color: liveErrors ? "#c62828" : "#b7791f", fontSize: 11 }}>
               {liveErrors ? `${liveErrors} ERROR${liveErrors === 1 ? "" : "S"} will export with this job` : `${liveFlags.length} flag${liveFlags.length === 1 ? "" : "s"} will export with this job`} — see Checks above.
             </div>
           )}
@@ -2832,49 +2832,49 @@ export default function App() {
 
 // ---------- styles ----------
 const st = {
-  app: { display: "flex", height: "100vh", background: "#15171b", color: "#e8e6e1", fontFamily: "'Segoe UI', system-ui, sans-serif", fontSize: 13 },
-  panel: { width: 340, minWidth: 340, display: "flex", flexDirection: "column", gap: 10, padding: 12, background: "#1d2026", borderRight: "1px solid #2b2f37", overflow: "auto" },
-  brand: { fontSize: 11, letterSpacing: "0.18em", color: "#8b909a", fontWeight: 700 },
-  section: { display: "flex", flexDirection: "column", gap: 6, paddingTop: 8, borderTop: "1px solid #2b2f37" },
-  h: { fontSize: 11, letterSpacing: "0.12em", color: "#8b909a", fontWeight: 700 },
+  app: { display: "flex", height: "100vh", background: "#f4f6f8", color: "#1b1e24", fontFamily: "'Segoe UI', system-ui, sans-serif", fontSize: 13 },
+  panel: { width: 340, minWidth: 340, display: "flex", flexDirection: "column", gap: 10, padding: 12, background: "#ffffff", borderRight: "1px solid #d9dde3", overflow: "auto" },
+  brand: { fontSize: 11, letterSpacing: "0.18em", color: "#5b6270", fontWeight: 700 },
+  section: { display: "flex", flexDirection: "column", gap: 6, paddingTop: 8, borderTop: "1px solid #d9dde3" },
+  h: { fontSize: 11, letterSpacing: "0.12em", color: "#5b6270", fontWeight: 700 },
   // v7.1 — fields sit LIGHTER than the panel with a visible border; focus ring comes from
-  // GLOBAL_CSS. (v7.0 fields were #15171b on #1d2026 with a #2b2f37 border: near-invisible.)
-  input: { background: "#262a32", border: "1px solid #4b5260", color: "#e8e6e1", borderRadius: 6, padding: "7px 9px", fontSize: 13 },
-  selectEl: { background: "#262a32", border: "1px solid #4b5260", color: "#e8e6e1", borderRadius: 6, padding: "6px", fontSize: 13 },
+  // GLOBAL_CSS. (v7.0 fields were #f4f6f8 on #ffffff with a #d9dde3 border: near-invisible.)
+  input: { background: "#ffffff", border: "1px solid #b8bfca", color: "#1b1e24", borderRadius: 6, padding: "7px 9px", fontSize: 13 },
+  selectEl: { background: "#ffffff", border: "1px solid #b8bfca", color: "#1b1e24", borderRadius: 6, padding: "6px", fontSize: 13 },
   row: { display: "flex", gap: 6, alignItems: "center" },
-  meta: { fontSize: 11.5, color: "#8b909a", lineHeight: 1.45 },
-  warn: { fontSize: 12, color: "#e8b34b", background: "#2a2415", border: "1px solid #4a3d1c", borderRadius: 6, padding: "8px 10px" },
-  drop: { border: "1.5px dashed #3a3f49", borderRadius: 8, padding: "22px 12px", textAlign: "center", color: "#8b909a", cursor: "pointer", fontSize: 12.5 },
+  meta: { fontSize: 11.5, color: "#5b6270", lineHeight: 1.45 },
+  warn: { fontSize: 12, color: "#b7791f", background: "#fff5dc", border: "1px solid #e5c97a", borderRadius: 6, padding: "8px 10px" },
+  drop: { border: "1.5px dashed #b8bfca", borderRadius: 8, padding: "22px 12px", textAlign: "center", color: "#5b6270", cursor: "pointer", fontSize: 12.5 },
   chips: { display: "flex", flexWrap: "wrap", gap: 5 },
   swatch: { width: 12, height: 12, borderRadius: 2, display: "inline-block", flexShrink: 0 },
-  roomRow: { display: "flex", gap: 6, alignItems: "center", background: "#15171b", border: "1px solid #2b2f37", borderRadius: 6, padding: "6px 8px", cursor: "pointer" },
-  chInput: { width: 40, background: "#262a32", border: "1px solid #4b5260", color: "#e8e6e1", borderRadius: 4, padding: "2px 4px", fontSize: 12, textAlign: "right" },
-  selBox: { background: "#15171b", border: "1px solid #2b2f37", borderRadius: 6, padding: 8, display: "flex", flexDirection: "column", gap: 6 },
+  roomRow: { display: "flex", gap: 6, alignItems: "center", background: "#f4f6f8", border: "1px solid #d9dde3", borderRadius: 6, padding: "6px 8px", cursor: "pointer" },
+  chInput: { width: 40, background: "#ffffff", border: "1px solid #b8bfca", color: "#1b1e24", borderRadius: 4, padding: "2px 4px", fontSize: 12, textAlign: "right" },
+  selBox: { background: "#f4f6f8", border: "1px solid #d9dde3", borderRadius: 6, padding: 8, display: "flex", flexDirection: "column", gap: 6 },
   qRoom: { display: "flex", flexDirection: "column", gap: 3, padding: "6px 0" },
   qLine: { display: "flex", gap: 7, alignItems: "center", fontSize: 12.5 },
   num: { fontFamily: "ui-monospace, Menlo, monospace", fontSize: 12 },
   canvasWrap: { flex: 1, position: "relative", overflow: "hidden", background: "#101216", touchAction: "none", cursor: "crosshair" },
   empty: { position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", color: "#4a4f59", fontSize: 15 },
-  zoomBadge: { position: "absolute", bottom: 10, right: 12, background: "#1d2026cc", border: "1px solid #2b2f37", borderRadius: 6, padding: "4px 10px", fontSize: 11.5, color: "#8b909a" },
+  zoomBadge: { position: "absolute", bottom: 10, right: 12, background: "#ffffffe6", border: "1px solid #d9dde3", borderRadius: 6, padding: "4px 10px", fontSize: 11.5, color: "#5b6270" },
   overlay: { position: "fixed", inset: 0, background: "#000a", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 50 },
-  modal: { width: "min(680px, 92vw)", background: "#1d2026", border: "1px solid #2b2f37", borderRadius: 10, padding: 14, display: "flex", flexDirection: "column", gap: 8 },
-  ta: { width: "100%", height: 220, background: "#15171b", border: "1px solid #4b5260", color: "#e8e6e1", borderRadius: 6, padding: 8, fontSize: 11, fontFamily: "ui-monospace, Menlo, monospace", resize: "vertical", boxSizing: "border-box" },
+  modal: { width: "min(680px, 92vw)", background: "#ffffff", border: "1px solid #d9dde3", borderRadius: 10, padding: 14, display: "flex", flexDirection: "column", gap: 8 },
+  ta: { width: "100%", height: 220, background: "#f4f6f8", border: "1px solid #b8bfca", color: "#1b1e24", borderRadius: 6, padding: 8, fontSize: 11, fontFamily: "ui-monospace, Menlo, monospace", resize: "vertical", boxSizing: "border-box" },
 };
 // v7.1 — one global rule set instead of per-input handlers: a visible focus ring on every
 // field and legible placeholders. Injected once via <style> inside `modals`.
 const GLOBAL_CSS = `
   input:focus, select:focus, textarea:focus { outline: none !important; border-color: #6ea8fe !important; box-shadow: 0 0 0 2px rgba(110,168,254,.28); }
-  input::placeholder, textarea::placeholder { color: #8b909a; opacity: 1; }
+  input::placeholder, textarea::placeholder { color: #7a8390; opacity: 1; }
   input[type=checkbox] { accent-color: #2f6df6; width: 14px; height: 14px; }
 `;
 const btn = (active) => ({
-  background: active ? "#2f6df6" : "#15171b", color: active ? "#fff" : "#e8e6e1",
-  border: `1px solid ${active ? "#2f6df6" : "#2b2f37"}`, borderRadius: 6,
+  background: active ? "#2f6df6" : "#f4f6f8", color: active ? "#fff" : "#1b1e24",
+  border: `1px solid ${active ? "#2f6df6" : "#d9dde3"}`, borderRadius: 6,
   padding: "7px 10px", fontSize: 12.5, cursor: "pointer",
 });
 const chip = (c, active) => ({
   display: "flex", alignItems: "center", gap: 6,
-  background: active ? "#262b34" : "#15171b", color: "#e8e6e1",
-  border: `1px solid ${active ? c.color : "#2b2f37"}`, borderRadius: 6,
+  background: active ? "#e6eefc" : "#f4f6f8", color: "#1b1e24",
+  border: `1px solid ${active ? c.color : "#d9dde3"}`, borderRadius: 6,
   padding: "6px 8px", fontSize: 12, cursor: "pointer",
 });
