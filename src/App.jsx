@@ -140,7 +140,10 @@ const markerKindById = (id) => MARKER_KINDS.find((k) => k.id === id);
 // sized them off the image width (worse again). A marker now occupies MARKER_SIZE_M of real
 // floor via the floor's calibration — it scales exactly like the rooms it sits in, on screen
 // and in every exported image. Uncalibrated floors fall back to a fixed image-pixel size.
-const MARKER_SIZE_M = 0.6;
+// v7.4 — Jordan: 0.6 m still hid room detail. Size is now a per-browser preference (S/M/L) with a
+// much smaller default, and the disc behind the icon is translucent so linework shows through.
+const MARKER_SIZES_M = { S: 0.22, M: 0.32, L: 0.45 };
+const MARKER_SIZE_DEFAULT = "M";
 const MARKER_FALLBACK_PX = 40;
 const MARKER_MIN_SCREEN_PX = 14;   // never smaller than this on screen — stays clickable when zoomed far out
 
@@ -182,7 +185,7 @@ function migrateFloors(d) {
   };
 }
 
-const APP_VERSION = "v7.3";
+const APP_VERSION = "v7.4";
 // v7.1 — remember cosmetic panel state per browser (collapsed sections, last category, covering
 // default). Never job data — that lives in IndexedDB. Any failure falls back to defaults.
 const UI_PREFS_KEY = "bml-markup-ui-prefs-v1";
@@ -329,7 +332,9 @@ export default function App() {
   // collapsible panel sections (not persisted). Instructions starts COLLAPSED (v7.0 item 6):
   // the text lives in the first-open modal + this section, not permanently on screen.
   const [collapsed, setCollapsed] = useState(() => loadUiPrefs().collapsed || { instructions: true });
-  useEffect(() => { try { localStorage.setItem(UI_PREFS_KEY, JSON.stringify({ collapsed, activeCat, floorCov })); } catch {} }, [collapsed, activeCat, floorCov]);
+  const [markerSize, setMarkerSize] = useState(() => (MARKER_SIZES_M[loadUiPrefs().markerSize] ? loadUiPrefs().markerSize : MARKER_SIZE_DEFAULT));
+  const markerSizeM = MARKER_SIZES_M[markerSize] || MARKER_SIZES_M[MARKER_SIZE_DEFAULT];
+  useEffect(() => { try { localStorage.setItem(UI_PREFS_KEY, JSON.stringify({ collapsed, activeCat, floorCov, markerSize })); } catch {} }, [collapsed, activeCat, floorCov, markerSize]);
   // export / import modals (copy/paste kept for Cowork paste-in convenience)
   const [exportModal, setExportModal] = useState(null); // {title, hint, text, filename}
   const [importOpen, setImportOpen] = useState(false);
@@ -808,7 +813,7 @@ export default function App() {
   // screen-px floor so a far-zoomed-out marker is still visible and clickable.
   const markerSizePx = (m) => {
     const sc = scaleOf(m);
-    const planPx = sc ? MARKER_SIZE_M / sc : MARKER_FALLBACK_PX;
+    const planPx = sc ? markerSizeM / sc : MARKER_FALLBACK_PX;
     return Math.max(planPx, MARKER_MIN_SCREEN_PX / zoom);
   };
   const hitMarker = (m, p) => Math.hypot(p.x - m.x, p.y - m.y) < markerSizePx(m) / 2 + 4 / zoom;
@@ -1694,8 +1699,8 @@ export default function App() {
       for (const m of fMarkers) {
         const el = iconEls[m.kind]; if (!el) continue;
         const sc = scaleOf(m);
-        const ms = Math.round(sc ? MARKER_SIZE_M / sc : MARKER_FALLBACK_PX);
-        g.fillStyle = "#ffffff";
+        const ms = Math.round(sc ? markerSizeM / sc : MARKER_FALLBACK_PX);
+        g.fillStyle = "rgba(255,255,255,0.72)";
         g.beginPath(); g.arc(m.x, m.y, ms / 2 + Math.max(2, fs / 8), 0, Math.PI * 2); g.fill();
         g.strokeStyle = "#333"; g.lineWidth = Math.max(1, fs / 14); g.stroke();
         g.drawImage(el, m.x - ms / 2, m.y - ms / 2, ms, ms);
@@ -2361,7 +2366,15 @@ export default function App() {
               )}
               {/* v7.0 item 8 — equipment markers: pick a kind, click the plan to place. Fixed-size
                   point markers, room = active room, multiple per room. */}
-              <div style={{ ...st.meta, marginTop: 4 }}>Equipment markers (click plan to place — tagged to the active room):</div>
+              <div style={{ ...st.row, marginTop: 4, justifyContent: "space-between" }}>
+                <span style={st.meta}>Equipment markers (click plan to place — tagged to the active room):</span>
+                <label style={{ ...st.meta, display: "flex", gap: 4, alignItems: "center" }} title="Marker footprint on the plan — S 0.22 m · M 0.32 m · L 0.45 m. Display preference; never affects quantities.">
+                  Size
+                  <select style={{ ...st.selectEl, padding: "2px 4px", fontSize: 11 }} value={markerSize} onChange={(e) => setMarkerSize(e.target.value)}>
+                    {Object.keys(MARKER_SIZES_M).map((k) => <option key={k} value={k}>{k}</option>)}
+                  </select>
+                </label>
+              </div>
               <div style={st.chips}>
                 {MARKER_KINDS.map((k) => (
                   <button key={k.id} style={chip({ color: "#5b6270" }, tool === "marker" && activeMarkerKind === k.id)}
@@ -2804,7 +2817,7 @@ export default function App() {
                 return (
                   <g key={`mk-${m.id}`} opacity={dim ? 0.15 : 1}>
                     <title>{kind.label}{mRoom ? ` — ${mRoom.name}` : " — NO ROOM ⚠"}{kind.hasHeatMats ? ` · heat mats ${parseFloat(m.heatMatsM2) > 0 ? m.heatMatsM2 + " m²" : "NOT SET"}` : ""}</title>
-                    <circle cx={m.x} cy={m.y} r={ms / 2 + 2 / zoom} fill="#fff" stroke={isSel ? "#2f6df6" : "#333"} strokeWidth={(isSel ? 2.5 : 1) / zoom} />
+                    <circle cx={m.x} cy={m.y} r={ms / 2 + 2 / zoom} fill="#fff" fillOpacity={0.72} stroke={isSel ? "#2f6df6" : "#333"} strokeWidth={(isSel ? 2.5 : 1) / zoom} />
                     <image href={kind.icon} x={m.x - ms / 2} y={m.y - ms / 2} width={ms} height={ms} style={{ pointerEvents: "none" }} />
                   </g>
                 );
