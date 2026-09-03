@@ -175,7 +175,11 @@ function migrateFloors(d) {
   };
 }
 
-const APP_VERSION = "v7.0";
+const APP_VERSION = "v7.1";
+// v7.1 — remember cosmetic panel state per browser (collapsed sections, last category, covering
+// default). Never job data — that lives in IndexedDB. Any failure falls back to defaults.
+const UI_PREFS_KEY = "bml-markup-ui-prefs-v1";
+const loadUiPrefs = () => { try { return JSON.parse(localStorage.getItem(UI_PREFS_KEY)) || {}; } catch { return {}; } };
 const BUILD_DATE = typeof __BUILD_DATE__ !== "undefined" ? __BUILD_DATE__ : "";
 
 // ---------- edge snapping (v4.2) ----------
@@ -278,7 +282,7 @@ export default function App() {
   const [activeRoom, setActiveRoom] = useState(null);
   // tools
   const [tool, setTool] = useState("select");
-  const [activeCat, setActiveCat] = useState("floor_strip");
+  const [activeCat, setActiveCat] = useState(() => (catById(loadUiPrefs().activeCat) ? loadUiPrefs().activeCat : "floor_strip"));
   const [wallHgt, setWallHgt] = useState("full"); // default removal height for NEW wall_strip lines
   const [wallCornice, setWallCornice] = useState(false);
   const [wallSkirting, setWallSkirting] = useState(false);
@@ -287,7 +291,9 @@ export default function App() {
   const [roofInsulationType, setRoofInsulationType] = useState("batts");
   const [cabHgt, setCabHgt] = useState("");        // default cabH for NEW cabinetry shapes: "" | "0.9" | "2.1" | "2.4" | "custom"
   const [cabHgtCustom, setCabHgtCustom] = useState("");
-  const [floorCov, setFloorCov] = useState("");    // v7.0 — default covering for NEW floor-strip shapes ("" = not chosen)
+  const [floorCov, setFloorCov] = useState(() => (floorCovById(loadUiPrefs().floorCov) ? loadUiPrefs().floorCov : ""));    // default covering for NEW floor-strip shapes ("" = not chosen)
+  const [isolate, setIsolate] = useState(false);   // v7.1 — dim every room except the active one (cosmetic only)
+  const [jobQuery, setJobQuery] = useState("");    // v7.1 — home-screen job filter
   // shapes
   const [shapes, setShapes] = useState([]);
   const [selId, setSelId] = useState(null);
@@ -315,7 +321,8 @@ export default function App() {
   const [hiddenRooms, setHiddenRooms] = useState(() => new Set());
   // collapsible panel sections (not persisted). Instructions starts COLLAPSED (v7.0 item 6):
   // the text lives in the first-open modal + this section, not permanently on screen.
-  const [collapsed, setCollapsed] = useState({ instructions: true });
+  const [collapsed, setCollapsed] = useState(() => loadUiPrefs().collapsed || { instructions: true });
+  useEffect(() => { try { localStorage.setItem(UI_PREFS_KEY, JSON.stringify({ collapsed, activeCat, floorCov })); } catch {} }, [collapsed, activeCat, floorCov]);
   // export / import modals (copy/paste kept for Cowork paste-in convenience)
   const [exportModal, setExportModal] = useState(null); // {title, hint, text, filename}
   const [importOpen, setImportOpen] = useState(false);
@@ -584,7 +591,14 @@ export default function App() {
   // v6.0 — an undo entry snapshots shapes AND rooms. Deleting a room removes both, so restoring
   // only the shapes would bring them back pointing at a room id that no longer exists, silently
   // turning them into orphans — worse than not undoing at all.
-  const pushUndo = useCallback(() => setUndoStack((s) => [...s.slice(-49), { shapes, rooms, markers }]), [shapes, rooms, markers]);
+  // v7.1 — an undo entry snapshots ROOMS only when the operation itself mutates rooms
+  // (deleteRoom). Every shape draw and even a select-click pushes an entry; typing a room
+  // height is NOT an undo step. Snapshotting rooms on every entry meant any Ctrl+Z after a
+  // height edit silently rolled the height back to the snapshot ("CH keeps resetting to 2.4"
+  // — reproduced: edit 3.1 → undo a shape → 2.7). Restore therefore touches rooms only when
+  // the entry carries them.
+  const pushUndo = useCallback((withRooms = false) =>
+    setUndoStack((s) => [...s.slice(-49), { shapes, markers, ...(withRooms ? { rooms } : {}) }]), [shapes, rooms, markers]);
 
   // ---------- pointer handling ----------
   const onPointerDown = (e) => {
@@ -640,7 +654,9 @@ export default function App() {
       const s = cat.kind === "fill"
         ? { id: nid(), type: "rect", cat: cat.id, room: roomForShape, floorId: activeFloor, x: pt.x, y: pt.y, w: 0, h: 0,
             ...(INSULATION_CATS.has(cat.id) ? { insulation: roofInsulation, insulationType: roofInsulationType } : {}),
-            ...(cat.id === "cabinetry" ? { cabH: cabHgt === "custom" ? cabHgtCustom : cabHgt } : {}) }
+            ...(cat.id === "cabinetry" ? { cabH: cabHgt === "custom" ? cabHgtCustom : cabHgt } : {}),
+            // v7.1 — the chip's covering default now actually lands on the shape (v7.0 omitted this)
+            ...(cat.id === "floor_strip" ? { floorCov } : {}) }
         : { id: nid(), type: "line", cat: cat.id, room: roomForShape, floorId: activeFloor, x1: pt.x, y1: pt.y, x2: pt.x, y2: pt.y,
             ...(cat.id === "wall_strip" ? { hgt: wallHgt, cornice: wallCornice, skirting: wallSkirting, skirtingOnly: wallSkirtingOnly } : {}) };
       setShapes((a) => [...a, s]);
@@ -710,15 +726,25 @@ export default function App() {
   const onPointerUp = () => {
     const d = drag.current; drag.current = null;
     if (d?.mode === "new") {
-      setShapes((a) => a.filter((s) => {
-        if (s.id !== d.id) return true;
-        const ok = s.type === "rect" ? (s.w > MIN_PX && s.h > MIN_PX) : Math.hypot(s.x2 - s.x1, s.y2 - s.y1) > MIN_PX;
-        if (!ok) setUndoStack((u) => u.slice(0, -1));
-        return ok;
-      }));
+      // Decide keep/discard from the live drag geometry so the selection can be set outside
+      // the updater (updaters must stay pure).
+      const cur = shapes.find((s) => s.id === d.id);
+      const ok = cur && (cur.type === "rect" ? (cur.w > MIN_PX && cur.h > MIN_PX) : Math.hypot(cur.x2 - cur.x1, cur.y2 - cur.y1) > MIN_PX);
+      if (!ok) { setShapes((a) => a.filter((s) => s.id !== d.id)); setUndoStack((u) => u.slice(0, -1)); }
+      // v7.1 — a freshly drawn shape becomes the selection so its covering / height / zone can
+      // be set immediately. The draw tool stays active so consecutive shapes still work.
+      else { setSelId(d.id); setSelMarkerId(null); }
     }
   };
 
+  // v7.1 — zoom about the viewport centre (buttons), same maths as the wheel handler
+  const zoomAbout = (nz) => {
+    const el = wrapRef.current; if (!el) return;
+    const z = Math.min(8, Math.max(0.05, nz));
+    const cx = el.clientWidth / 2, cy = el.clientHeight / 2;
+    setPan({ x: cx - (cx - pan.x) * (z / zoom), y: cy - (cy - pan.y) * (z / zoom) });
+    setZoom(z);
+  };
   const onWheel = (e) => {
     if (!img) return;
     e.preventDefault();
@@ -739,12 +765,26 @@ export default function App() {
       if ((e.key === "Delete" || e.key === "Backspace") && selMarkerId && !isTyping(e)) {
         pushUndo(); setMarkers((a) => a.filter((m) => m.id !== selMarkerId)); setSelMarkerId(null);
       }
+      // v7.1 — Escape: drop the selection and return to the Select tool
+      if (e.key === "Escape" && !isTyping(e)) { setSelId(null); setSelMarkerId(null); setMeasure(null); setTool("select"); }
+      // v7.1 — arrow keys nudge the selected shape/marker by 1 SCREEN px (Shift = 10)
+      if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(e.key) && (selId || selMarkerId) && !isTyping(e)) {
+        e.preventDefault();
+        const step = (e.shiftKey ? 10 : 1) / zoom;
+        const dx = e.key === "ArrowLeft" ? -step : e.key === "ArrowRight" ? step : 0;
+        const dy = e.key === "ArrowUp" ? -step : e.key === "ArrowDown" ? step : 0;
+        pushUndo();
+        if (selId) setShapes((a) => a.map((s) => s.id !== selId ? s : s.type === "rect"
+          ? { ...s, x: s.x + dx, y: s.y + dy } : { ...s, x1: s.x1 + dx, y1: s.y1 + dy, x2: s.x2 + dx, y2: s.y2 + dy }));
+        if (selMarkerId) setMarkers((a) => a.map((m) => m.id !== selMarkerId ? m : { ...m, x: m.x + dx, y: m.y + dy }));
+      }
       if ((e.ctrlKey || e.metaKey) && e.key === "z" && !isTyping(e)) {
         setUndoStack((u) => {
           if (!u.length) return u;
           const prev = u[u.length - 1];
-          setShapes(prev.shapes); setRooms(prev.rooms);
-          setMarkers(prev.markers ?? []);   // pre-v7 entries in a live session have no markers key
+          setShapes(prev.shapes);
+          if (prev.rooms) setRooms(prev.rooms);   // only room-mutating entries carry rooms (v7.1)
+          setMarkers(prev.markers ?? []);
           setSelId(null); setSelMarkerId(null);   // the selection may be one of the items being restored/removed
           return u.slice(0, -1);
         });
@@ -753,7 +793,7 @@ export default function App() {
     const ku = (e) => { if (e.code === "Space") spaceDown.current = false; };
     window.addEventListener("keydown", kd); window.addEventListener("keyup", ku);
     return () => { window.removeEventListener("keydown", kd); window.removeEventListener("keyup", ku); };
-  }, [selId, selMarkerId, pushUndo]);
+  }, [selId, selMarkerId, pushUndo, zoom]);
   const isTyping = (e) => ["INPUT", "TEXTAREA", "SELECT"].includes(e.target.tagName);
 
   // hit tests
@@ -1235,7 +1275,7 @@ export default function App() {
     <label key={k} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 11.5, gap: 4 }}>
       {label}
       <input value={property[k]} onChange={(e) => setProp(k, e.target.value)} inputMode="decimal"
-        style={{ width: 46, background: "#15171b", border: "1px solid #2b2f37", color: "#e8e6e1", borderRadius: 4, padding: "2px 4px", textAlign: "right", fontSize: 11.5 }} />
+        style={{ ...st.chInput, width: 46, fontSize: 11.5 }} />
     </label>
   );
   const propCheckField = (label, k) => (
@@ -1867,20 +1907,25 @@ export default function App() {
   const deleteRoom = (id) => {
     const r = rooms.find((x) => x.id === id); if (!r) return;
     const rs = shapes.filter((s) => s.room === id);
+    const rMk = markers.filter((m) => m.room === id);   // equipment markers go with the room
     let msg = `Delete room "${r.name || "(unnamed)"}"?`;
-    if (rs.length) {
+    if (rs.length || rMk.length) {
       const area = rs.reduce((a, s) => a + (s.type === "rect" ? (qtyOf(s) || 0) : 0), 0);
       const lines = rs.filter((s) => s.type === "line").length;
-      const parts = [`${rs.length} shape${rs.length === 1 ? "" : "s"}`];
+      const parts = [];
+      if (rs.length) parts.push(`${rs.length} shape${rs.length === 1 ? "" : "s"}`);
       if (area > 0) parts.push(`${fmt(round2(area))} m²`);
       if (lines) parts.push(`${lines} line${lines === 1 ? "" : "s"}`);
+      if (rMk.length) parts.push(`${rMk.length} equipment marker${rMk.length === 1 ? "" : "s"}`);
       msg = `Delete room "${r.name || "(unnamed)"}" AND ITS MARKUP?\n\nThis destroys ${parts.join(" · ")}.\nThose quantities will disappear from the quote.\n\nCtrl+Z will undo it.`;
     }
     if (!window.confirm(msg)) return;
-    pushUndo();
+    pushUndo(true);   // this op mutates rooms — the only entry type that restores them
     setShapes((a) => a.filter((s) => s.room !== id));
+    setMarkers((a) => a.filter((m) => m.room !== id));
     setRooms((a) => a.filter((x) => x.id !== id));
     if (activeRoom === id) setActiveRoom(rooms.find((x) => x.id !== id && x.floorId === activeFloor)?.id ?? null);
+    if (selMarkerId != null && rMk.some((m) => m.id === selMarkerId)) setSelMarkerId(null);
     if (selId != null && rs.some((s) => s.id === selId)) setSelId(null);
     if (roofVoidTarget === id) setRoofVoidTarget(null);
   };
@@ -1927,6 +1972,7 @@ export default function App() {
 
   const modals = (
     <>
+      <style>{GLOBAL_CSS}</style>
       {instructionsOpen && (
         <div style={st.overlay}>
           <div style={{ ...st.modal, maxWidth: 560 }} onClick={(e) => e.stopPropagation()}>
@@ -1997,9 +2043,13 @@ export default function App() {
           <button style={{ ...btn(false), padding: "12px" }} onClick={() => { setCopyMsg(""); setImportOpen(true); }}>
             Import project (paste JSON or pick file)
           </button>
-          <div style={st.h}>Saved jobs</div>
+          <div style={{ ...st.row, justifyContent: "space-between" }}>
+            <div style={st.h}>Saved jobs ({index.length})</div>
+            <input style={{ ...st.input, padding: "5px 8px", fontSize: 12, width: 200 }} placeholder="Search job no. or name…"
+              value={jobQuery} onChange={(e) => setJobQuery(e.target.value)} />
+          </div>
           {index.length === 0 && <div style={st.meta}>No saved jobs yet. Markup autosaves — you can close and return any time.</div>}
-          {index.map((j) => (
+          {index.filter((j) => !jobQuery.trim() || (j.name || "Unnamed job").toLowerCase().includes(jobQuery.trim().toLowerCase())).map((j) => (
             <div key={j.id} style={{ ...st.roomRow, padding: "10px 12px" }}>
               <div style={{ flex: 1, cursor: "pointer" }} onClick={() => openJob(j.id)}>
                 <div style={{ fontWeight: 600 }}>{j.name || "Unnamed job"}</div>
@@ -2019,6 +2069,15 @@ export default function App() {
   const propertyTotals = computePropertyTotals();
   const insulationTotals = computeInsulationRemoval();
   const equipTotals = computeEquipment();
+  // v7.1 — the SAME flags the export carries, shown live. Until now they were invisible until
+  // Jordan exported. Clicking a flag focuses the room/floor it names.
+  const liveFlags = view === "editor" ? buildExport().flags : [];
+  const liveErrors = liveFlags.filter((f) => f.severity === "ERROR").length;
+  const focusFlag = async (f) => {
+    if (f.floor != null && f.floor !== "") { const fl = floors.find((x) => (x.name || "") === f.floor); if (fl && fl.id !== activeFloor) await switchFloor(fl.id); }
+    if (f.room) { const rm = rooms.find((x) => x.name === f.room && (!f.floor || (floors.find((fl) => fl.id === x.floorId)?.name || "") === f.floor)); if (rm) setActiveRoom(rm.id); }
+    setCollapsed((c) => ({ ...c, rooms: false }));
+  };
   const anyPropertyEntered = propertyTotals.decon_m2 > 0 || insulationTotals.total_m2 > 0 ||
     propertyTotals.floorProt > 0 || equipTotals.any ||
     parseFloat(property.air_mover_units) > 0 ||
@@ -2056,7 +2115,7 @@ export default function App() {
                 <input value={f.name} onClick={(e) => e.stopPropagation()}
                   placeholder="label… (e.g. G / L1 / L2)"
                   onChange={(e) => renameFloor(f.id, e.target.value)}
-                  style={{ flex: 1, minWidth: 0, background: "transparent", border: "none", borderBottom: "1px dashed #3a3f49", color: "#e8e6e1", fontSize: 13, padding: "2px 0" }} />
+                  style={{ flex: 1, minWidth: 0, background: "transparent", border: "none", borderBottom: "1px dashed #6a7180", color: "#e8e6e1", fontSize: 13, padding: "2px 0" }} />
                 <span style={{ ...st.meta, fontSize: 10 }} title="rooms · shapes on this floor">{nR}r·{nS}s</span>
                 {!f.scale && (nR > 0 || nS > 0) && <span title="This floor is not calibrated — its quantities are invalid" style={{ color: "#e8b34b", fontSize: 11 }}>⚠</span>}
                 <span title="Move up" style={{ cursor: "pointer", opacity: i === 0 ? 0.25 : 0.7 }}
@@ -2129,47 +2188,52 @@ export default function App() {
                 Roof void = between the top floor and the roof. A ceiling void between storeys is NOT a roof void —
                 scope that with the strip-ceiling shape and its insulation option.
               </div>
-              {rooms.filter((r) => (r.floorId ?? activeFloor) === activeFloor).map((r) => (
-                <div key={r.id} style={{ ...st.roomRow, outline: activeRoom === r.id ? "1px solid #6ea8fe" : "none", opacity: hiddenRooms.has(r.id) ? 0.55 : 1 }}
-                  onClick={() => setActiveRoom(r.id)}>
-                  <input value={r.name} onClick={(e) => e.stopPropagation()}
-                    onChange={(e) => setRooms((a) => a.map((x) => x.id === r.id ? { ...x, name: e.target.value } : x))}
-                    style={{ flex: 1, minWidth: 0, background: "transparent", border: "none", borderBottom: "1px dashed #3a3f49", color: "#e8e6e1", fontSize: 13, padding: "2px 0" }} />
-                  {r.void_type && (
-                    <span title={`Exported as void_type "${r.void_type}" — the engine keys off this, not the name`}
-                      style={{ fontSize: 9.5, padding: "1px 4px", borderRadius: 3, background: "#795548", color: "#fff", whiteSpace: "nowrap" }}>
-                      {r.void_type === "roof_void" ? "ROOF VOID" : "CEILING VOID"}
-                    </span>
-                  )}
-                  <span style={st.meta}>CH</span>
-                  <input style={st.chInput} value={r.ch}
-                    onClick={(e) => e.stopPropagation()}
-                    onChange={(e) => setRooms((a) => a.map((x) => x.id === r.id ? { ...x, ch: e.target.value } : x))} />
-                  <span style={st.meta}>m</span>
-                  <label title="Plumbing isolation" onClick={(e) => e.stopPropagation()} style={{ display: "flex", alignItems: "center", gap: 2, fontSize: 10.5, color: "#8b909a" }}>
-                    <input type="checkbox" checked={!!r.plumbIso}
-                      onChange={(e) => setRooms((a) => a.map((x) => x.id === r.id ? { ...x, plumbIso: e.target.checked } : x))} />PL
-                  </label>
-                  <label title="Electrical isolation" onClick={(e) => e.stopPropagation()} style={{ display: "flex", alignItems: "center", gap: 2, fontSize: 10.5, color: "#8b909a" }}>
-                    <input type="checkbox" checked={!!r.elecIso}
-                      onChange={(e) => setRooms((a) => a.map((x) => x.id === r.id ? { ...x, elecIso: e.target.checked } : x))} />EL
-                  </label>
-                  {/* v7.0 item 9 — per-room counts quantify reads and otherwise CONFIRMs on:
-                      EF = electrical fittings on linings being stripped; PF = plumbing fixtures */}
-                  <label title="Electrical fittings on linings being stripped (count)" onClick={(e) => e.stopPropagation()} style={{ display: "flex", alignItems: "center", gap: 2, fontSize: 10.5, color: "#8b909a" }}>
-                    EF<input style={{ ...st.chInput, width: 28 }} value={r.elecFittings ?? ""} inputMode="numeric"
-                      onChange={(e) => setRooms((a) => a.map((x) => x.id === r.id ? { ...x, elecFittings: e.target.value } : x))} />
-                  </label>
-                  <label title="Plumbing fixtures (count — plumbing prices base + per fixture)" onClick={(e) => e.stopPropagation()} style={{ display: "flex", alignItems: "center", gap: 2, fontSize: 10.5, color: "#8b909a" }}>
-                    PF<input style={{ ...st.chInput, width: 28 }} value={r.plumbFixtures ?? ""} inputMode="numeric"
-                      onChange={(e) => setRooms((a) => a.map((x) => x.id === r.id ? { ...x, plumbFixtures: e.target.value } : x))} />
-                  </label>
-                  <span title="Toggle this room's shapes on canvas" style={{ cursor: "pointer", opacity: hiddenRooms.has(r.id) ? 1 : 0.5 }}
-                    onClick={(e) => { e.stopPropagation(); toggleHiddenRoom(r.id); }}>👁</span>
-                  <span title="Delete this room" style={{ cursor: "pointer", opacity: 0.6 }}
-                    onClick={(e) => { e.stopPropagation(); deleteRoom(r.id); }}>✕</span>
-                </div>
-              ))}
+              {/* v7.1 — two-line room row. v7.0 crammed name · CH · PL · EL · EF · PF · 👁 · ✕ into one
+                  340 px line and the name input (flex:1, minWidth:0) collapsed to nothing. */}
+              {rooms.filter((r) => (r.floorId ?? activeFloor) === activeFloor).map((r) => {
+                const mk = markers.filter((m) => m.room === r.id).length;
+                const upd = (patch) => setRooms((a) => a.map((x) => x.id === r.id ? { ...x, ...patch } : x));
+                const tiny = { display: "flex", alignItems: "center", gap: 3, fontSize: 10.5, color: "#a7adb8" };
+                return (
+                  <div key={r.id} style={{ ...st.roomRow, flexDirection: "column", alignItems: "stretch", gap: 5,
+                      outline: activeRoom === r.id ? "1px solid #6ea8fe" : "none", opacity: hiddenRooms.has(r.id) ? 0.55 : 1 }}
+                    onClick={() => setActiveRoom(r.id)}>
+                    <div style={st.row}>
+                      <input value={r.name} onClick={(e) => e.stopPropagation()} placeholder="room name"
+                        onChange={(e) => upd({ name: e.target.value })}
+                        style={{ flex: 1, minWidth: 80, background: "transparent", border: "none", borderBottom: "1px dashed #6a7180", color: "#e8e6e1", fontSize: 13, padding: "2px 0" }} />
+                      {r.void_type && (
+                        <span title={`Exported as void_type "${r.void_type}" — the engine keys off this, not the name`}
+                          style={{ fontSize: 9.5, padding: "1px 4px", borderRadius: 3, background: "#795548", color: "#fff", whiteSpace: "nowrap" }}>
+                          {r.void_type === "roof_void" ? "ROOF VOID" : "CEILING VOID"}
+                        </span>
+                      )}
+                      {mk > 0 && <span title={`${mk} equipment marker${mk === 1 ? "" : "s"} in this room`} style={{ ...st.meta, fontSize: 10.5, whiteSpace: "nowrap" }}>{mk} ⚙</span>}
+                      <span title="Toggle this room's shapes on canvas" style={{ cursor: "pointer", opacity: hiddenRooms.has(r.id) ? 1 : 0.5 }}
+                        onClick={(e) => { e.stopPropagation(); toggleHiddenRoom(r.id); }}>👁</span>
+                      <span title="Delete this room" style={{ cursor: "pointer", opacity: 0.6 }}
+                        onClick={(e) => { e.stopPropagation(); deleteRoom(r.id); }}>✕</span>
+                    </div>
+                    <div style={{ ...st.row, gap: 8, flexWrap: "wrap" }} onClick={(e) => e.stopPropagation()}>
+                      <label style={tiny} title="Ceiling height (m)">CH
+                        <input style={st.chInput} value={r.ch ?? ""} inputMode="decimal" onChange={(e) => upd({ ch: e.target.value })} />m
+                      </label>
+                      <label style={tiny} title="Plumbing isolation"><input type="checkbox" checked={!!r.plumbIso} onChange={(e) => upd({ plumbIso: e.target.checked })} />PL</label>
+                      <label style={tiny} title="Electrical isolation"><input type="checkbox" checked={!!r.elecIso} onChange={(e) => upd({ elecIso: e.target.checked })} />EL</label>
+                      {/* v7.0 item 9 — EF = electrical fittings on linings being stripped; PF = plumbing fixtures */}
+                      <label style={tiny} title="Electrical fittings on linings being stripped (count)">EF
+                        <input style={{ ...st.chInput, width: 30 }} value={r.elecFittings ?? ""} inputMode="numeric" onChange={(e) => upd({ elecFittings: e.target.value })} />
+                      </label>
+                      <label style={tiny} title="Plumbing fixtures (count — plumbing prices base + per fixture)">PF
+                        <input style={{ ...st.chInput, width: 30 }} value={r.plumbFixtures ?? ""} inputMode="numeric" onChange={(e) => upd({ plumbFixtures: e.target.value })} />
+                      </label>
+                    </div>
+                  </div>
+                );
+              })}
+              <label style={{ ...st.meta, display: "flex", gap: 6, alignItems: "center", cursor: "pointer" }} title="Dim every room except the active one (display only — never affects quantities)">
+                <input type="checkbox" checked={isolate} onChange={(e) => setIsolate(e.target.checked)} /> Isolate active room on canvas
+              </label>
               <div style={st.meta}>Active room is tagged onto every new shape.</div>
             </>
           )}
@@ -2511,6 +2575,24 @@ export default function App() {
 
         {/* v7.0 item 5 — no private scroll trap: the section flows like every other one and the
             whole left bar is one continuous scroll, so nothing needs collapsing to be reached */}
+        {/* v7.1 — live checks: identical to export.flags, colour-coded, click to focus */}
+        <div style={st.section}>
+          {sectionHead("checks", `Checks — ${liveErrors} error${liveErrors === 1 ? "" : "s"}, ${liveFlags.length - liveErrors} flag${liveFlags.length - liveErrors === 1 ? "" : "s"}`)}
+          {!collapsed.checks && (
+            liveFlags.length === 0
+              ? <div style={{ ...st.meta, color: "#6fbf73" }}>No errors or flags — the export will be clean.</div>
+              : liveFlags.map((f, i) => (
+                <div key={`${f.code}-${i}`} onClick={() => focusFlag(f)} title={`${f.code}${f.room || f.floor ? " — click to focus" : ""}`}
+                  style={{ ...st.meta, cursor: f.room || f.floor ? "pointer" : "default", padding: "5px 7px", borderRadius: 5,
+                    background: f.severity === "ERROR" ? "#2a1717" : "#2a2415",
+                    borderLeft: `3px solid ${f.severity === "ERROR" ? "#e86a6a" : "#e8b34b"}`, color: "#e8e6e1", fontSize: 11 }}>
+                  <span style={{ fontFamily: "ui-monospace, monospace", fontSize: 10, color: f.severity === "ERROR" ? "#e86a6a" : "#e8b34b" }}>{f.severity} · {f.code}</span>
+                  <div>{f.message.replace(/^(ERROR|FLAG) — /, "")}</div>
+                </div>
+              ))
+          )}
+        </div>
+
         <div style={st.section}>
           {sectionHead("qty", "5 · Quantities")}
           {!collapsed.qty && (
@@ -2529,7 +2611,9 @@ export default function App() {
                           {r.voidType === "roof_void" ? "ROOF VOID" : "CEILING VOID"}
                         </span>
                       )}
-                      <span style={st.meta}> CH {r.ch} m</span>
+                      {r.chSet
+                        ? <span style={st.meta}> CH {r.ch} m</span>
+                        : <span style={{ ...st.meta, color: "#e8b34b" }}> CH not set — using 2.4 ⚠</span>}
                     </div>
                     {(r.plumbIso || r.elecIso) && (
                       <div style={{ ...st.meta, fontSize: 11 }}>
@@ -2618,8 +2702,14 @@ export default function App() {
         </div>
 
         <div style={st.section}>
+          {liveFlags.length > 0 && (
+            <div style={{ ...st.meta, color: liveErrors ? "#e86a6a" : "#e8b34b", fontSize: 11 }}>
+              {liveErrors ? `${liveErrors} ERROR${liveErrors === 1 ? "" : "S"} will export with this job` : `${liveFlags.length} flag${liveFlags.length === 1 ? "" : "s"} will export with this job`} — see Checks above.
+            </div>
+          )}
           <button style={{ ...btn(false), background: "#2f6df6", borderColor: "#2f6df6", color: "#fff" }}
-            onClick={exportQuantities} disabled={!floors.some((f) => f.scale) || !shapes.length}>
+            onClick={exportQuantities} disabled={!floors.some((f) => f.scale) || !shapes.length}
+            title={!floors.some((f) => f.scale) ? "Calibrate at least one floor first" : !shapes.length ? "Nothing marked up yet" : "Download the quantities JSON"}>
             Download quantities JSON
           </button>
           {/* v6.0 — one image per floor; exports the floor currently on screen */}
@@ -2662,8 +2752,9 @@ export default function App() {
               {shapes.filter((s) => (s.floorId ?? activeFloor) === activeFloor && !hiddenCats.has(s.cat) && !hiddenRooms.has(s.room)).map((s) => {
                 const c = catById(s.cat);
                 const isSel = s.id === selId;
+                const dim = isolate && activeRoom != null && s.room !== activeRoom;   // v7.1 isolate (cosmetic)
                 return (
-                  <g key={s.id}>
+                  <g key={s.id} opacity={dim ? 0.15 : 1}>
                     {s.type === "rect" ? (
                       <rect x={s.x} y={s.y} width={s.w} height={s.h}
                         fill={c.color} fillOpacity={FILL_OPACITY}
@@ -2693,8 +2784,11 @@ export default function App() {
                 const kind = markerKindById(m.kind); if (!kind) return null;
                 const ms = MARKER_SCREEN_PX / zoom;
                 const isSel = m.id === selMarkerId;
+                const dim = isolate && activeRoom != null && m.room !== activeRoom;
+                const mRoom = rooms.find((r) => r.id === m.room);
                 return (
-                  <g key={`mk-${m.id}`}>
+                  <g key={`mk-${m.id}`} opacity={dim ? 0.15 : 1}>
+                    <title>{kind.label}{mRoom ? ` — ${mRoom.name}` : " — NO ROOM ⚠"}{kind.hasHeatMats ? ` · heat mats ${parseFloat(m.heatMatsM2) > 0 ? m.heatMatsM2 + " m²" : "NOT SET"}` : ""}</title>
                     <circle cx={m.x} cy={m.y} r={ms / 2 + 2 / zoom} fill="#fff" stroke={isSel ? "#2f6df6" : "#333"} strokeWidth={(isSel ? 2.5 : 1) / zoom} />
                     <image href={kind.icon} x={m.x - ms / 2} y={m.y - ms / 2} width={ms} height={ms} style={{ pointerEvents: "none" }} />
                   </g>
@@ -2722,8 +2816,12 @@ export default function App() {
           </div>
         )}
         {img && (
-          <div style={st.zoomBadge}>
-            {Math.round(zoom * 100)}% · <span style={{ cursor: "pointer" }} onClick={() => fitView(img.w, img.h)}>fit</span>
+          <div style={{ ...st.zoomBadge, display: "flex", gap: 6, alignItems: "center", padding: "4px 6px" }}>
+            <button style={{ ...btn(false), padding: "2px 8px" }} onClick={() => zoomAbout(zoom / 1.25)} title="Zoom out">−</button>
+            <span style={{ minWidth: 42, textAlign: "center" }}>{Math.round(zoom * 100)}%</span>
+            <button style={{ ...btn(false), padding: "2px 8px" }} onClick={() => zoomAbout(zoom * 1.25)} title="Zoom in">+</button>
+            <button style={{ ...btn(false), padding: "2px 8px" }} onClick={() => fitView(img.w, img.h)} title="Fit the whole plan">Fit</button>
+            <button style={{ ...btn(false), padding: "2px 8px" }} onClick={() => zoomAbout(1)} title="Actual plan pixels">100%</button>
           </div>
         )}
       </div>
@@ -2739,8 +2837,10 @@ const st = {
   brand: { fontSize: 11, letterSpacing: "0.18em", color: "#8b909a", fontWeight: 700 },
   section: { display: "flex", flexDirection: "column", gap: 6, paddingTop: 8, borderTop: "1px solid #2b2f37" },
   h: { fontSize: 11, letterSpacing: "0.12em", color: "#8b909a", fontWeight: 700 },
-  input: { background: "#15171b", border: "1px solid #2b2f37", color: "#e8e6e1", borderRadius: 6, padding: "7px 9px", fontSize: 13, outline: "none" },
-  selectEl: { background: "#15171b", border: "1px solid #2b2f37", color: "#e8e6e1", borderRadius: 6, padding: "6px", fontSize: 13 },
+  // v7.1 — fields sit LIGHTER than the panel with a visible border; focus ring comes from
+  // GLOBAL_CSS. (v7.0 fields were #15171b on #1d2026 with a #2b2f37 border: near-invisible.)
+  input: { background: "#262a32", border: "1px solid #4b5260", color: "#e8e6e1", borderRadius: 6, padding: "7px 9px", fontSize: 13 },
+  selectEl: { background: "#262a32", border: "1px solid #4b5260", color: "#e8e6e1", borderRadius: 6, padding: "6px", fontSize: 13 },
   row: { display: "flex", gap: 6, alignItems: "center" },
   meta: { fontSize: 11.5, color: "#8b909a", lineHeight: 1.45 },
   warn: { fontSize: 12, color: "#e8b34b", background: "#2a2415", border: "1px solid #4a3d1c", borderRadius: 6, padding: "8px 10px" },
@@ -2748,7 +2848,7 @@ const st = {
   chips: { display: "flex", flexWrap: "wrap", gap: 5 },
   swatch: { width: 12, height: 12, borderRadius: 2, display: "inline-block", flexShrink: 0 },
   roomRow: { display: "flex", gap: 6, alignItems: "center", background: "#15171b", border: "1px solid #2b2f37", borderRadius: 6, padding: "6px 8px", cursor: "pointer" },
-  chInput: { width: 40, background: "transparent", border: "1px solid #2b2f37", color: "#e8e6e1", borderRadius: 4, padding: "2px 4px", fontSize: 12, textAlign: "right" },
+  chInput: { width: 40, background: "#262a32", border: "1px solid #4b5260", color: "#e8e6e1", borderRadius: 4, padding: "2px 4px", fontSize: 12, textAlign: "right" },
   selBox: { background: "#15171b", border: "1px solid #2b2f37", borderRadius: 6, padding: 8, display: "flex", flexDirection: "column", gap: 6 },
   qRoom: { display: "flex", flexDirection: "column", gap: 3, padding: "6px 0" },
   qLine: { display: "flex", gap: 7, alignItems: "center", fontSize: 12.5 },
@@ -2758,8 +2858,15 @@ const st = {
   zoomBadge: { position: "absolute", bottom: 10, right: 12, background: "#1d2026cc", border: "1px solid #2b2f37", borderRadius: 6, padding: "4px 10px", fontSize: 11.5, color: "#8b909a" },
   overlay: { position: "fixed", inset: 0, background: "#000a", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 50 },
   modal: { width: "min(680px, 92vw)", background: "#1d2026", border: "1px solid #2b2f37", borderRadius: 10, padding: 14, display: "flex", flexDirection: "column", gap: 8 },
-  ta: { width: "100%", height: 220, background: "#15171b", border: "1px solid #2b2f37", color: "#e8e6e1", borderRadius: 6, padding: 8, fontSize: 11, fontFamily: "ui-monospace, Menlo, monospace", resize: "vertical", boxSizing: "border-box" },
+  ta: { width: "100%", height: 220, background: "#15171b", border: "1px solid #4b5260", color: "#e8e6e1", borderRadius: 6, padding: 8, fontSize: 11, fontFamily: "ui-monospace, Menlo, monospace", resize: "vertical", boxSizing: "border-box" },
 };
+// v7.1 — one global rule set instead of per-input handlers: a visible focus ring on every
+// field and legible placeholders. Injected once via <style> inside `modals`.
+const GLOBAL_CSS = `
+  input:focus, select:focus, textarea:focus { outline: none !important; border-color: #6ea8fe !important; box-shadow: 0 0 0 2px rgba(110,168,254,.28); }
+  input::placeholder, textarea::placeholder { color: #8b909a; opacity: 1; }
+  input[type=checkbox] { accent-color: #2f6df6; width: 14px; height: 14px; }
+`;
 const btn = (active) => ({
   background: active ? "#2f6df6" : "#15171b", color: active ? "#fff" : "#e8e6e1",
   border: `1px solid ${active ? "#2f6df6" : "#2b2f37"}`, borderRadius: 6,
