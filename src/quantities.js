@@ -57,7 +57,12 @@ export const DEFAULT_PROPERTY = {
   ac_ducted_units: "", ac_duct_removal_rooms: "", prv_areas: "",
   contents_packout: false, contents_inventory: false, skip_bin: false, asbestos_testing: false,
   contents_storage: "none", roof_void_mode: "all_surfaces",
+  // v7.5 item 7 — Claims Hero job? true | false | null. REQUIRED choice with NO default: null until
+  // Jordan picks Yes/No in the job header. NEVER inferred from the client / company / project name.
+  ch: null,
 };
+// v7.5 item 7 — only an explicit boolean counts; anything else is "not set".
+export const chOfProperty = (p) => (p?.ch === true || p?.ch === false ? p.ch : null);
 // Legacy property keys carried invisibly so an old job NEVER silently loses a quantity on
 // re-export. Unit counts cannot be converted to markers (no positions) and drying-mat UNITS
 // cannot be converted to m² — so they ride along, export under equipment.legacy_* with a loud
@@ -815,6 +820,11 @@ export function makeQuantities({ jobName = "", rooms = [], shapes = [], markers 
       // Property scope is entered ONCE per job and is therefore already a combined total across
       // every floor — there is nothing for a downstream consumer to merge or de-duplicate.
       property: {
+        // v7.5 item 7 — Claims Hero. `job` stays a STRING (the title); the choice lives here.
+        // rate_variant is the key quantify v7.11 already reads for the CH electrical / plumbing
+        // overrides. ac_variant is a SEPARATE AC-rate key and is never written from this.
+        ch: chOfProperty(property),
+        rate_variant: chOfProperty(property) === true ? "ch" : chOfProperty(property) === false ? "non_ch" : null,
         // v7.0 item 8 — equipment TOTALS derived from placed markers (sum of rooms), under the
         // per-room names, PLUS legacy aliases so pre-v7 consumers keep reading a single number.
         split_ac_decon_insitu_count: eq.totals.split_ac_decon_insitu_count,
@@ -878,6 +888,10 @@ export function makeQuantities({ jobName = "", rooms = [], shapes = [], markers 
         },
       },
       flags: [
+        // v7.5 item 7 — the choice is required; export proceeds with ch: null, loudly.
+        ...(chOfProperty(property) === null
+          ? [mkFlag("CH_FLAG_NOT_SET", "FLAG", 'FLAG — "Claims Hero job?" is NOT SET in the job header (next to the job name). Exported as property.ch: null / rate_variant: null — the CH electrical and plumbing rates cannot be selected until you choose Yes or No. It is never inferred from the client or project name.')]
+          : []),
         ...(shapes.some((s) => s.room == null && !catById(s.cat)?.propertyScope)
           ? [mkFlag("UNASSIGNED_SHAPES", "ERROR", "UNASSIGNED shapes present — reassign before pricing")] : []),
         // v7.0 item 8 — markers with no room would export counts against no room (orphan lines).

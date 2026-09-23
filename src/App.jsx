@@ -1300,6 +1300,16 @@ export default function App() {
         {!storageOk && <div style={st.warn}>No persistence in this browser — export project JSON before closing.</div>}
 
         <input style={st.input} placeholder="Job — e.g. BMLJ00652 — 12 Sample St" value={jobName} onChange={(e) => setJobName(e.target.value)} />
+        {/* v7.5 item 7 — Claims Hero: required, NO default, never inferred from the job name */}
+        <div style={{ ...st.row, gap: 6 }} data-ch-choice="">
+          <span style={{ ...st.meta, color: property.ch == null ? "#b7791f" : "#1b1e24", fontWeight: 600 }}>Claims Hero job?</span>
+          {[[true, "Yes"], [false, "No"]].map(([v, label]) => (
+            <label key={label} style={{ display: "flex", gap: 3, alignItems: "center", fontSize: 12, cursor: "pointer" }}>
+              <input type="radio" name="claims-hero" checked={property.ch === v} onChange={() => setProp("ch", v)} /> {label}
+            </label>
+          ))}
+          {property.ch == null && <span style={{ ...st.meta, fontSize: 10.5, color: "#b7791f" }}>not set — choose one</span>}
+        </div>
 
         {/* ---------- floors strip (v5.0) ---------- */}
         <div style={st.section}>
