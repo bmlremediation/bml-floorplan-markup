@@ -30,8 +30,12 @@ where local fixture plans/exports go.
 - **Regression guard** — BMLJ00685 ground fixture, `garage` room:
   footprint `20.82` m², perimeter `22.03` m, surface `94.51` m², net `49.23` m². Any change to the
   union / snapping / surface geometry must reproduce these exactly.
-- **Never clamp a negative C2 net to zero.** Net ≤ 0 raises `C2_NET_NOT_POSITIVE` (ERROR) and
-  exports the real number. It is the double-height/stairwell signature and must reach a human.
+- **Never clamp a negative C2 net to zero — with ONE exception (v7.5, CO-2026-09-22 item 6).** Net ≤ 0
+  raises `C2_NET_NOT_POSITIVE` (ERROR) and exports the real number: it is the double-height/stairwell
+  signature and must reach a human. The exception is the **full-strip signature** — C2 drawn, net ≤ 0,
+  AND `wall_strip_m2 > 0` AND `ceiling_strip_m2 > 0` (2 dp, floor not required; matches quantify v7.10):
+  net is clamped to 0, `full_strip: true`, and the non-blocking `C2_FULL_STRIP_SIGNATURE` (FLAG) replaces
+  the ERROR. Do not widen that condition.
 - **`void_type` is never inferred from a room name.** Names are free text. A room called
   "understair void" with `void_type: null` is an ordinary room, and is flagged, not reinterpreted.
   Roof-void shapes bind to a roof-void room by `void_type` only. `ceiling_void` is retired: never
