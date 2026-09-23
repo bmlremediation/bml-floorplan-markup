@@ -1,4 +1,7 @@
 import React, { useState, useRef, useEffect, useCallback } from "react";
+import { flushSync } from "react-dom";
+import NumField from "./NumField.jsx";
+import { flushNumFields } from "./numText.js";
 import { listJobs, getJob, putJob, deleteJob as dbDeleteJob, getImageBlob, putImageBlob, deleteImageBlob, imageKeyFor, dataURLToBlob, blobToDataURL } from "./db.js";
 // v7.0 item 8 — equipment marker icons (CO 2026-08-27, supplied in _Artifact and HTML App
 // Masters/assets/, downscaled to 96px before bundling).
@@ -144,6 +147,9 @@ export default function App() {
   const idRef = useRef(1);
   const nid = () => idRef.current++;
   const saveTimer = useRef(null);
+  const latest = useRef({});   // v7.5 item 1 — this render's handlers (see fresh())
+  const commitPendingEdits = () => flushSync(() => flushNumFields());
+  const fresh = (name) => (...args) => { commitPendingEdits(); return latest.current[name](...args); };
   const loadedRef = useRef(false); // suppress autosave during hydration
   const pendingRescale = useRef(null); // {w,h} of original image when importing a markup-only project
   const taRef = useRef(null);
@@ -300,14 +306,34 @@ export default function App() {
     } catch { setSaveState("error"); }
   }, [storageOk, jobId, jobName, rooms, shapes, markers, floors, activeFloor, property, img]);
 
-  // autosave (debounced) on any markup change
+  // autosave (debounced) on any markup change.
+  // v7.5 item 1 — 1200 ms -> 400 ms: a number box now commits ~120 ms after the last keystroke,
+  // so a typed value reaches IndexedDB well inside a second (a reload 1 s after typing restores
+  // it). persistMeta writes only the job record, never the plan image, so this is cheap.
   useEffect(() => {
     if (view !== "editor" || !storageOk || !loadedRef.current || !jobId) return;
     setSaveState("dirty");
     clearTimeout(saveTimer.current);
-    saveTimer.current = setTimeout(() => persistMeta(), 1200);
+    saveTimer.current = setTimeout(() => persistMeta(), 400);
     return () => clearTimeout(saveTimer.current);
   }, [shapes, rooms, markers, jobName, floors, property]); // eslint-disable-line
+
+  // v7.5 item 1 — coverage is checked by SELECTOR over the left bar, not a hand-kept list: any
+  // numeric box added later that is not a NumField (and not explicitly exempted) shouts in dev.
+  useEffect(() => {
+    if (!import.meta.env?.DEV) return;
+    const stray = document.querySelectorAll('[data-left-bar] input:is([inputmode="decimal"],[inputmode="numeric"],[type="number"]):not([data-numfield]):not([data-numfield-exempt])');
+    if (stray.length) console.error(`v7.5 item 1: ${stray.length} numeric box(es) in the left bar do not save as typed — use <NumField>`, stray);
+  });
+
+  // v7.5 item 1 — leaving / reloading the page commits any pending number-box edit and saves at once
+  // instead of waiting on the autosave debounce.
+  useEffect(() => {
+    const onLeave = () => { if (view === "editor" && loadedRef.current) fresh("persistMeta")(); };
+    window.addEventListener("pagehide", onLeave);
+    window.addEventListener("beforeunload", onLeave);
+    return () => { window.removeEventListener("pagehide", onLeave); window.removeEventListener("beforeunload", onLeave); };
+  }); // re-bind each render so view is fresh
 
   // ---------- image input (compress -> persist as Blob) ----------
   const loadImageFile = (file) => {
@@ -708,7 +734,7 @@ export default function App() {
   const propNumField = (label, k) => (
     <label key={k} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 11.5, gap: 4 }}>
       {label}
-      <input value={property[k]} onChange={(e) => setProp(k, e.target.value)} inputMode="decimal"
+      <NumField value={property[k]} onCommit={(v) => setProp(k, v)}
         style={{ ...st.chInput, width: 46, fontSize: 11.5 }} />
     </label>
   );
@@ -1182,6 +1208,13 @@ export default function App() {
     </>
   );
 
+  // ---------- v7.5 item 1 — nothing reads state while a number box still has an edit pending ----------
+  // commitPendingEdits() pushes every queued number-box value into state and re-renders
+  // synchronously (flushSync). A handler that READS job state is then invoked through fresh(), which
+  // runs the version of that handler from the render that already holds the committed values —
+  // calling the old closure after the flush would read the pre-commit state and race the debounce.
+  latest.current = { exportQuantities, exportProject, exportScopeImage, exportScopeImagesPerOverlay, switchFloor, persistMeta };
+
   // ================= HOME (job list) =================
   if (view === "home") {
     return (
@@ -1244,9 +1277,9 @@ export default function App() {
   // ================= EDITOR =================
   return (
     <div style={st.app}>
-      <div style={st.panel}>
+      <div style={st.panel} data-left-bar="">
         <div style={{ ...st.row, justifyContent: "space-between" }}>
-          <span style={{ ...st.brand, cursor: "pointer" }} onClick={() => { persistMeta(); listJobs().then(setIndex); setView("home"); }}>← JOBS</span>
+          <span style={{ ...st.brand, cursor: "pointer" }} onClick={() => { fresh("persistMeta")(); listJobs().then(setIndex); setView("home"); }}>← JOBS</span>
           <span style={{ ...st.meta, color: saveState === "error" ? "#c62828" : "#5b6270" }}>{saveLabel}</span>
         </div>
         {!storageOk && <div style={st.warn}>No persistence in this browser — export project JSON before closing.</div>}
@@ -1266,7 +1299,7 @@ export default function App() {
             const nS = shapes.filter((s) => s.floorId === f.id).length;
             return (
               <div key={f.id} style={{ ...st.roomRow, outline: active ? "1px solid #6ea8fe" : "none", cursor: "pointer" }}
-                onClick={() => switchFloor(f.id)}>
+                onClick={() => fresh("switchFloor")(f.id)}>
                 <input value={f.name} onClick={(e) => e.stopPropagation()}
                   placeholder="label… (e.g. G / L1 / L2)"
                   onChange={(e) => renameFloor(f.id, e.target.value)}
@@ -1305,7 +1338,10 @@ export default function App() {
               </button>
               {calLine && (
                 <div style={st.row}>
-                  <input style={{ ...st.input, flex: 1 }} placeholder="Wall length" value={calInput} onChange={(e) => setCalInput(e.target.value)} inputMode="decimal" />
+                  {/* v7.5 item 1 — deliberately NOT a NumField: this is the argument to the Set
+                      button, not stored job data. Committing it per keystroke would recalibrate
+                      the floor mid-typing (e.g. "3" on the way to "3.6"). */}
+                  <input data-numfield-exempt="calibration input — applied by Set" style={{ ...st.input, flex: 1 }} placeholder="Wall length" value={calInput} onChange={(e) => setCalInput(e.target.value)} inputMode="decimal" />
                   <select style={st.selectEl} value={calUnit} onChange={(e) => setCalUnit(e.target.value)}>
                     <option value="m">m</option><option value="mm">mm</option>
                   </select>
@@ -1352,7 +1388,7 @@ export default function App() {
                 return (
                   <div key={r.id} style={{ ...st.roomRow, flexDirection: "column", alignItems: "stretch", gap: 5,
                       outline: activeRoom === r.id ? "1px solid #6ea8fe" : "none", opacity: hiddenRooms.has(r.id) ? 0.55 : 1 }}
-                    onClick={() => setActiveRoom(r.id)}>
+                    onClick={() => { commitPendingEdits(); setActiveRoom(r.id); }}>
                     <div style={st.row}>
                       <input value={r.name} onClick={(e) => e.stopPropagation()} placeholder="room name"
                         onChange={(e) => upd({ name: e.target.value })}
@@ -1371,16 +1407,16 @@ export default function App() {
                     </div>
                     <div style={{ ...st.row, gap: 8, flexWrap: "wrap" }} onClick={(e) => e.stopPropagation()}>
                       <label style={tiny} title="Ceiling height (m)">CH
-                        <input style={st.chInput} value={r.ch ?? ""} inputMode="decimal" onChange={(e) => upd({ ch: e.target.value })} />m
+                        <NumField style={st.chInput} value={r.ch ?? ""} onCommit={(v) => upd({ ch: v })} />m
                       </label>
                       <label style={tiny} title="Plumbing isolation"><input type="checkbox" checked={!!r.plumbIso} onChange={(e) => upd({ plumbIso: e.target.checked })} />PL</label>
                       <label style={tiny} title="Electrical isolation"><input type="checkbox" checked={!!r.elecIso} onChange={(e) => upd({ elecIso: e.target.checked })} />EL</label>
                       {/* v7.0 item 9 — EF = electrical fittings on linings being stripped; PF = plumbing fixtures */}
                       <label style={tiny} title="Electrical fittings on linings being stripped (count)">EF
-                        <input style={{ ...st.chInput, width: 30 }} value={r.elecFittings ?? ""} inputMode="numeric" onChange={(e) => upd({ elecFittings: e.target.value })} />
+                        <NumField style={{ ...st.chInput, width: 30 }} value={r.elecFittings ?? ""} inputMode="numeric" onCommit={(v) => upd({ elecFittings: v })} />
                       </label>
                       <label style={tiny} title="Plumbing fixtures (count — plumbing prices base + per fixture)">PF
-                        <input style={{ ...st.chInput, width: 30 }} value={r.plumbFixtures ?? ""} inputMode="numeric" onChange={(e) => upd({ plumbFixtures: e.target.value })} />
+                        <NumField style={{ ...st.chInput, width: 30 }} value={r.plumbFixtures ?? ""} inputMode="numeric" onCommit={(v) => upd({ plumbFixtures: v })} />
                       </label>
                     </div>
                   </div>
@@ -1493,7 +1529,7 @@ export default function App() {
                   {cabHgt === "custom" && (
                     <div style={st.row}>
                       <span style={st.meta}>Height (m):</span>
-                      <input style={{ ...st.input, flex: 1 }} value={cabHgtCustom} onChange={(e) => setCabHgtCustom(e.target.value)} inputMode="decimal" />
+                      <NumField style={{ ...st.input, flex: 1 }} value={cabHgtCustom} onCommit={setCabHgtCustom} />
                     </div>
                   )}
                   {!cabHgt && <div style={{ ...st.meta, color: "#b7791f" }}>No height selected — new shapes will need one set before export (face area cannot price a footprint).</div>}
@@ -1588,8 +1624,8 @@ export default function App() {
                         {(selectVal === "custom") && (
                           <div style={st.row}>
                             <span style={st.meta}>Height (m):</span>
-                            <input style={{ ...st.input, flex: 1 }} value={sel.cabH ?? ""}
-                              onChange={(e) => { pushUndo(); const v = e.target.value; setShapes((a) => a.map((s) => s.id === sel.id ? { ...s, cabH: v } : s)); }} inputMode="decimal" />
+                            <NumField key={sel.id} style={{ ...st.input, flex: 1 }} value={sel.cabH ?? ""}
+                              onCommit={(v) => { pushUndo(); setShapes((a) => a.map((s) => s.id === sel.id ? { ...s, cabH: v } : s)); }} />
                           </div>
                         )}
                         {!sel.cabH && <div style={{ ...st.meta, color: "#b7791f" }}>No height set — this shape exports as a hard ERROR (face area cannot price a footprint).</div>}
@@ -1599,8 +1635,8 @@ export default function App() {
                   {sel.cat === "condition2" && (
                     <div style={st.row}>
                       <span style={st.meta}>Height override (m):</span>
-                      <input style={{ ...st.input, flex: 1 }} placeholder={`Room default (${roomCH(sel.room)})`} value={sel.c2H ?? ""}
-                        onChange={(e) => { pushUndo(); const v = e.target.value; setShapes((a) => a.map((s) => s.id === sel.id ? { ...s, c2H: v } : s)); }} inputMode="decimal" />
+                      <NumField key={sel.id} allowEmpty style={{ ...st.input, flex: 1 }} placeholder={`Room default (${roomCH(sel.room)})`} value={sel.c2H ?? ""}
+                        onCommit={(v) => { pushUndo(); setShapes((a) => a.map((s) => s.id === sel.id ? { ...s, c2H: v } : s)); }} />
                     </div>
                   )}
                   {/* v7.0 item 1 — covering on THIS floor-strip shape (required before export) */}
@@ -1653,8 +1689,8 @@ export default function App() {
                       <>
                         <div style={st.row}>
                           <span style={st.meta}>Heat mats (m²):</span>
-                          <input style={{ ...st.input, flex: 1 }} value={selMarker.heatMatsM2 ?? ""} inputMode="decimal"
-                            onChange={(e) => { pushUndo(); const v = e.target.value; setMarkers((a) => a.map((m) => m.id === selMarker.id ? { ...m, heatMatsM2: v } : m)); }} />
+                          <NumField key={selMarker.id} style={{ ...st.input, flex: 1 }} value={selMarker.heatMatsM2 ?? ""}
+                            onCommit={(v) => { pushUndo(); setMarkers((a) => a.map((m) => m.id === selMarker.id ? { ...m, heatMatsM2: v } : m)); }} />
                         </div>
                         {!(parseFloat(selMarker.heatMatsM2) > 0) && <div style={{ ...st.meta, color: "#b7791f" }}>Heat mats m² is required — blank exports a hard ERROR and contributes zero.</div>}
                       </>
@@ -1871,25 +1907,25 @@ export default function App() {
             </div>
           )}
           <button style={{ ...btn(false), background: "#2f6df6", borderColor: "#2f6df6", color: "#fff" }}
-            onClick={exportQuantities} disabled={!floors.some((f) => f.scale) || !shapes.length}
+            onClick={fresh("exportQuantities")} disabled={!floors.some((f) => f.scale) || !shapes.length}
             title={!floors.some((f) => f.scale) ? "Calibrate at least one floor first" : !shapes.length ? "Nothing marked up yet" : "Download the quantities JSON"}>
             Download quantities JSON
           </button>
           {/* v6.0 — one image per floor; exports the floor currently on screen */}
-          <button style={btn(false)} onClick={exportScopeImage}
+          <button style={btn(false)} onClick={fresh("exportScopeImage")}
             disabled={!img || !shapes.some((s) => (s.floorId ?? activeFloor) === activeFloor)}
             title="Renders this floor's plan with every shape and a key, for a quote figure or ops handoff">
             Export scope image (PNG){floors.length > 1 && activeFloorRec?.name?.trim() ? ` — ${activeFloorRec.name.trim()}` : ""}
           </button>
           {/* v7.0 item 2 — one image per overlay + the combined; single-layer images don't
               blend where fills overlap, and each legend matches exactly what its image shows */}
-          <button style={btn(false)} onClick={exportScopeImagesPerOverlay}
+          <button style={btn(false)} onClick={fresh("exportScopeImagesPerOverlay")}
             disabled={!img || (!shapes.some((s) => (s.floorId ?? activeFloor) === activeFloor) && !markers.some((m) => (m.floorId ?? activeFloor) === activeFloor))}
             title="Downloads one PNG per overlay used on this floor (own shapes + own legend), plus the combined image">
             Export scope images (per overlay)
           </button>
           <div style={st.row}>
-            <button style={{ ...btn(false), flex: 1 }} onClick={exportProject} disabled={!shapes.length && !rooms.length}>
+            <button style={{ ...btn(false), flex: 1 }} onClick={fresh("exportProject")} disabled={!shapes.length && !rooms.length}>
               Save project (download)
             </button>
             <button style={{ ...btn(false), flex: 1 }} onClick={() => { setCopyMsg(""); setImportOpen(true); }}>
