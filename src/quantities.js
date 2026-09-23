@@ -515,7 +515,21 @@ export function makeQuantities({ jobName = "", rooms = [], shapes = [], markers 
       // export here as a negative condition2_net_m2, which the engine correctly refuses as the
       // double-height signature. Surfaced by the v7.0 acceptance run (a strip-only synthetic
       // room hard-errored the engine); latent since v4.0 because every real room had a C2 zone.
-      row.counts.condition2 = c2Shapes.length ? round2(c2Net) : 0;
+      // v7.5 item 6 — FULL-STRIP SIGNATURE (matches quantify v7.10's carve-out exactly, on the same
+      // 2-dp figures): C2 drawn, net <= 0, AND wall strip > 0 AND ceiling strip > 0 (a floor strip is
+      // NOT required). A wet room stripped wall + ceiling has nothing left to surface-clean, so the
+      // net is CLAMPED to 0 (never negative) and a non-blocking C2_FULL_STRIP_SIGNATURE flag asks
+      // the operator to confirm it is not a double-height space. The gross (surface, deductions)
+      // keeps its true values for audit. WITHOUT the signature, net <= 0 is still the double-height
+      // / stairwell case: the real negative number is exported and C2_NET_NOT_POSITIVE hard-errors.
+      row.fullStrip = c2Shapes.length > 0 && round2(c2Net) <= 0 &&
+        round2(row.counts.wall_strip || 0) > 0 && round2(row.counts.ceiling_strip || 0) > 0;
+      if (row.fullStrip) {
+        row.c2.net_m2 = 0;
+        row.c2.working += " → full-strip signature (wall + ceiling stripped): net clamped to 0";
+      }
+      row.c2.full_strip = row.fullStrip;
+      row.counts.condition2 = c2Shapes.length ? (row.fullStrip ? 0 : round2(c2Net)) : 0;
       // D1.3 — cabinetry working (footprint -> perimeter x height -> face).
       const cabShapes = rs.filter((s) => s.cat === "cabinetry");
       row.cabMissingH = cabShapes.some((s) => !cabHOf(s));
@@ -755,6 +769,9 @@ export function makeQuantities({ jobName = "", rooms = [], shapes = [], markers 
         // top-level 0, not carry a negative net the flat keys deny (found by the v7.0
         // close-out review: t3 lounge showed top-level 0 with nested net_m2 -10.7).
         condition2: r.c2 && r.c2.shapes.length ? r.c2 : null,
+        // v7.5 item 6 — full-strip signature (C2 net clamped to 0). A NEW boolean; the retired
+        // full_strip_m2 stays absent.
+        full_strip: !!r.fullStrip,
         cabinetry_face_m2: round2(r.counts.cabinetry),
         cabinetry_footprint_m2: round2(r.cabFootprint || 0),   // audit only — never priced
         cabinetry: r.cabWorking || null,
@@ -943,7 +960,13 @@ export function makeQuantities({ jobName = "", rooms = [], shapes = [], markers 
             { room: r.name, floor: floors.find((f) => f.id === r.floorId)?.name || "" })),
         // ---- v4.0 D1.6 hard-error validations. A quantity that is not physically plausible must
         // never leave the app silently: every one of these passed every downstream gate before.
-        ...roomRows().filter((r) => r.any && r.c2 && r.c2.shapes.length && r.c2.net_m2 <= 0)
+        // v7.5 item 6 — the full-strip signature is EXPECTED to net to <= 0: non-blocking, own code.
+        ...roomRows().filter((r) => r.fullStrip)
+          .map((r) => mkFlag("C2_FULL_STRIP_SIGNATURE", "FLAG",
+            `FLAG — ${r.name}: Condition 2 is 0 because wall AND ceiling are both stripped (stripped ${round2((r.counts.wall_strip||0)+(r.counts.ceiling_strip||0)+(r.counts.floor_strip||0))} m² ≥ C2 surface ${r.c2.surface_m2} m²) — full-strip signature, nothing left to surface-clean. CONFIRM this room is not a double-height space; if it is, set a per-shape height override (c2H) instead.`,
+            { room: r.name, floor: floors.find((f) => f.id === r.floorId)?.name || "" })),
+        // Unchanged meaning (stable code): net <= 0 WITHOUT the full-strip signature.
+        ...roomRows().filter((r) => r.any && r.c2 && r.c2.shapes.length && r.c2.net_m2 <= 0 && !r.fullStrip)
           .map((r) => mkFlag("C2_NET_NOT_POSITIVE", "ERROR",
             `ERROR — ${r.name}: Condition 2 NET is ${r.c2.net_m2} m² (<= 0). Stripped area (${round2((r.counts.wall_strip||0)+(r.counts.ceiling_strip||0)+(r.counts.floor_strip||0))} m²) meets or exceeds the computed C2 surface (${r.c2.surface_m2} m²). This is the double-height / stairwell signature — set a per-shape height override (c2H) or supply a manual C2 total. DO NOT PRICE THIS AS ZERO.`,
             { room: r.name, floor: floors.find((f) => f.id === r.floorId)?.name || "" })),

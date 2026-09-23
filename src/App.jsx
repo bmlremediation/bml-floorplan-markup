@@ -691,10 +691,10 @@ export default function App() {
     // net <= 0 (never silently hidden — D1.6) with a sub-line showing the working.
     if (c.id === "condition2") {
       if (!row.c2 || !row.c2.shapes.length) return [];
-      const isBad = row.c2.net_m2 <= 0;
+      const isBad = row.c2.net_m2 <= 0 && !row.fullStrip;   // v7.5 item 6 — a full-strip 0 is expected
       const stripTotal = round2(row.c2.deductions.wall_strip + row.c2.deductions.ceiling_strip + row.c2.deductions.floor_strip);
       return [
-        { label: "Condition 2 clean (NET)", text: `${fmt(row.c2.net_m2)} m²`, danger: isBad },
+        { label: row.fullStrip ? "Condition 2 clean (NET — full strip)" : "Condition 2 clean (NET)", text: `${fmt(row.c2.net_m2)} m²`, danger: isBad },
         { label: "  surface − strip", text: `${fmt(row.c2.surface_m2)} − ${fmt(stripTotal)}`, sub: true },
       ];
     }
