@@ -263,6 +263,8 @@ export function makeQuantities({ jobName = "", rooms = [], shapes = [], markers 
   const chOf = (room) => parseFloat(room?.ch) || 2.4; // room.ch is stored as a raw string (decimal-entry fix, v3.2)
   const roomCH = (roomId) => chOf(rooms.find((r) => r.id === roomId));
   const wallEffHeight = (s) => (s.hgt === "full" || s.hgt == null ? roomCH(s.room) : s.hgt);
+  // v7.5 item 3 — a wall-strip line carries cavity insulation removal (never on skirting-only)
+  const wallInsulationOn = (s) => s.cat === "wall_strip" && !!s.insulationRemoval && !s.skirtingOnly;
   const lenOf = (s) => Math.hypot(s.x2 - s.x1, s.y2 - s.y1) * (scaleOf(s) || 0); // m, at THIS shape's floor scale
   // v4.0 — cabinetry FACE area. Cabinetry is priced on the VERTICAL FACE it presents, never on
   // its plan footprint: a 2.4 m full-height unit and a 0.9 m base unit with identical footprints
@@ -313,7 +315,7 @@ export function makeQuantities({ jobName = "", rooms = [], shapes = [], markers 
     }
     if (s.cat === "wall_strip") {
       const len = lenOf(s), ch = wallEffHeight(s);
-      return `${fmt(len)}×${fmt(ch)} m = ${fmt(q)} m²`;
+      return `${fmt(len)}×${fmt(ch)} m = ${fmt(q)} m²${wallInsulationOn(s) ? " + cavity insulation" : ""}`;
     }
     return `${fmt(q)} m`;
   };
@@ -387,9 +389,17 @@ export function makeQuantities({ jobName = "", rooms = [], shapes = [], markers 
           row.wallRuns = cs.filter((s) => !s.skirtingOnly).length;
           row.wallRunAvgLinm = row.wallRuns ? row.wallLinm / row.wallRuns : 0;
           // D1.3 — wall-strip working (per-line length × its own height).
+          // v7.5 item 3 — wall-CAVITY insulation removal, per line. Area basis = that line's own
+          // m² (length × its removal height). A skirting-only line never opens the cavity, so it
+          // is always false there. Summed like wall_strip.m2 itself (no new geometry). Kept OUT of
+          // property.insulation_removal, which is the netted roof-void / strip-ceiling (horizontal
+          // plane) union with the batts / blown-in split that quantify prices from.
+          const insLines = cs.filter(wallInsulationOn);
+          row.wallInsulM2 = insLines.reduce((a, s) => a + (qtyOf(s) || 0), 0);
           row.wallWorking = {
             lines: cs.map((s) => ({ length_m: round2(lenOf(s)), height_m: s.skirtingOnly ? null : round2(wallEffHeight(s)),
-              m2: round2(qtyOf(s) || 0), cornice: !!s.cornice, skirting: !!s.skirting, skirtingOnly: !!s.skirtingOnly })),
+              m2: round2(qtyOf(s) || 0), cornice: !!s.cornice, skirting: !!s.skirting, skirtingOnly: !!s.skirtingOnly,
+              insulation_removal: wallInsulationOn(s) })),
             linm: 0, m2: 0, // filled in after loop once row.wallLinm/counts settle
             working: cs.length
               ? cs.map((s) => s.skirtingOnly ? `${round2(lenOf(s))}m skirting-only` : `${round2(lenOf(s))}×${round2(wallEffHeight(s))}`).join(" + ")
@@ -403,6 +413,10 @@ export function makeQuantities({ jobName = "", rooms = [], shapes = [], markers 
         row.wallWorking.linm = round2(row.wallLinm);
         row.wallWorking.m2 = round2(row.counts.wall_strip);
         row.wallWorking.working += ` = ${round2(row.counts.wall_strip)} m²`;
+        if (row.wallInsulM2 > 0) {
+          const ins = rs.filter((s) => s.cat === "wall_strip" && wallInsulationOn(s));
+          row.wallWorking.working += `; insulation: ${ins.map((s) => `${round2(lenOf(s))}×${round2(wallEffHeight(s))}`).join(" + ")} = ${round2(row.wallInsulM2)} m²`;
+        }
       }
       // ---- v4.0 CONDITION 2: UNION footprints per height-group FIRST, apply the factor ONCE
       // per group, then NET. A shape's own height override (D1.5 — stairwell/raked/void) puts
@@ -643,6 +657,7 @@ export function makeQuantities({ jobName = "", rooms = [], shapes = [], markers 
   // ---------- export (real downloads — self-hosted, no sandbox; copy/paste modal kept for Cowork paste-in) ----------
   const round2 = (v) => Math.round(v * 100) / 100;
   const buildExport = () => {
+    const exportRows = roomRows().filter((r) => !r.isUnassigned || r.any);
     const pt = computePropertyTotals();
     const ins = computeInsulationRemoval();
     const eq = computeEquipment();
@@ -676,7 +691,7 @@ export function makeQuantities({ jobName = "", rooms = [], shapes = [], markers 
       insulation_model: "v6.0 — INSULATION REMOVAL IS DE-DUPLICATED. Both a strip-ceiling shape and a roof-void shape can carry an insulation-removal flag, and they routinely cover the SAME void from two directions. property.insulation_removal is the AUTHORITATIVE, already-netted figure: the geometric UNION per floor and per type, with near-coincident edges snapped first. PRICE total_m2 / batts_m2 / blown_in_m2 FROM THERE. The per-room insulation_batts_m2 / insulation_blown_m2 exist ONLY on void rooms and are kept for audit ONLY: they omit every insulation-flagged strip-ceiling shape outside a void room (so summing them UNDER-charges), and within one void room they are a plain per-shape sum (so overlapping shapes there OVER-charge). Never derive insulation from them. total_m2 is the union of ALL insulation shapes and can never be overstated; where the two TYPES overlap the batts/blown split is unreliable and a hard ERROR flag says so, because the same square metre cannot have both removed. v6.0 also RETIRES ceiling_void as a room type: a ceiling void between storeys is scoped with the strip-ceiling shape and its insulation option, not as its own room. Only roof_void remains, and a roof-void shape is bound to a roof-void room by void_type — never by room name.",
       multifloor_model: "v5.0 — a job has FLOORS. floors[] carries each floor's own calibration; every room carries `floor` (the floor's TYPED label, never invented by the app — it may be \"\" if unlabelled) and `void_type`. PROPERTY SCOPE IS ENTERED ONCE PER JOB and is therefore already a combined total across every floor, including floor_protection_m2 — there is nothing to merge or de-duplicate, and a consumer must NOT attempt to. VOID ROOMS: void_type is `ceiling_void` (between an upper and a lower floor) or `roof_void` (between the top floor and the roof), and is ALWAYS an explicit human selection. Key off void_type ONLY — NEVER off the room name, which is free text: a room named \"understair void\" with void_type null is an ORDINARY room and is flagged, not reinterpreted. A void room carries decon_m2 + insulation_batts_m2 + insulation_blown_m2 + void_decon{} and is otherwise an ordinary room (own ceiling height, containment, strip). property.roof_void is GONE unless a legacy job still has roof-void shapes outside a void room, in which case it is present AND a hard ERROR flag is raised — never silently dropped.",
       condition2_model: "v5.0 — condition2_net_m2 is the PRICED figure and it is ALREADY NETTED. SURFACE: all Condition 2 shapes in a room are UNIONED (with near-coincident edges snapped within ~25 mm first, because shapes drawn by hand to abut are never numerically coincident — measured 12.9 mm and 19.3 mm on real markup — and an un-snapped union keeps the internal wall it exists to remove), then surface = 2 x union_area + union_perimeter x ceiling_height. Floor and ceiling are AREAS (2 x union area); walls are PERIMETER x height. The earlier footprint x (2 + H) form is DEAD: it multiplied the floor AREA by the height to get the wall term, which is only correct in a 4 x 4 m room — it under-read small rooms (1x1: -62%) and over-read large ones (10x10: +49%). NET: surface minus (wall_strip + ceiling_strip + floor_strip), because a stripped surface is already paid for twice (strip rate + cavity remediation) and must not be charged a third time as a Condition 2 clean. A per-shape height override (c2H) puts a shape in its own height group for double-height stairwells and raked ceilings. condition2_m2 is an ALIAS OF THE NET so no consumer can accidentally read the gross; the gross is condition2_surface_m2 (audit only). 'Full strip' no longer exists — floor_strip and ceiling_strip are separate overlays.",
-      rooms: roomRows().filter((r) => !r.isUnassigned || r.any).map((r) => {
+      rooms: exportRows.map((r) => {
         const rEq = eq.byRoom.get(r.roomId ?? null) || null;
         return {
         name: r.name, ceiling_height: r.ch,
@@ -709,6 +724,9 @@ export function makeQuantities({ jobName = "", rooms = [], shapes = [], markers 
         contingent_m2: round2(r.counts.contingent),
         wall_strip_linm: round2(r.wallLinm), wall_strip_m2: round2(r.counts.wall_strip),
         wall_strip: r.wallWorking || null,
+        // v7.5 item 3 — wall-CAVITY insulation removal (sum of the flagged lines' m²). Never part of
+        // property.insulation_removal (roof-void / strip-ceiling, netted, batts vs blown split).
+        wall_insulation_removal_m2: round2(r.wallInsulM2 || 0),
         cornice_linm: round2(r.corniceLinm), skirting_linm: round2(r.skirtingLinm),
         containment_count: r.counts.containment,
         // v7.0 item 1 — floor covering (detail verbatim from the selector; type is the 3-class
@@ -796,6 +814,9 @@ export function makeQuantities({ jobName = "", rooms = [], shapes = [], markers 
         // came from a strip-ceiling or a roof-void shape. PRICE THIS. The per-room
         // insulation_batts_m2 / insulation_blown_m2 on void rooms are AUDIT ONLY and will
         // double-charge the overlap if summed — they are the un-netted per-room contributions.
+        // v7.5 item 3 — wall-cavity insulation, summed over rooms. SEPARATE from insulation_removal
+        // below: never add it into total_m2 / batts_m2 / blown_in_m2.
+        wall_insulation_removal_m2: round2(exportRows.reduce((a, r) => a + (r.wallInsulM2 || 0), 0)),
         insulation_removal: { ...ins,
           _note: "AUTHORITATIVE and ALREADY NETTED (geometric union per floor, per type, with near-coincident edges snapped). Price total_m2 / batts_m2 / blown_in_m2 from HERE. NEVER derive insulation by summing the per-room insulation_batts_m2 / insulation_blown_m2 figures. Those exist ONLY on void rooms, so they OMIT every insulation-flagged strip-ceiling shape outside a void room — summing them UNDER-charges, and does so silently. Within a single void room they are also a plain per-shape sum, so two overlapping shapes there OVER-charge. The error runs in both directions depending on the markup, which is exactly why the netted figure here is the only pricing basis.",
         },
@@ -915,7 +936,7 @@ export function makeQuantities({ jobName = "", rooms = [], shapes = [], markers 
   // TYPED label, so it is "" precisely when FLOOR_NOT_LABELLED fires — use floors[] order there.
   const mkFlag = (code, severity, message, extra) => ({ code, severity, message, ...(extra || {}) });
 
-  return { scaleOfFloor, scaleOf, fmt, chOf, roomCH, wallEffHeight, lenOf, cabHOf, cabFaceOf, qtyOf, shapeLabel,
+  return { scaleOfFloor, scaleOf, wallInsulationOn, fmt, chOf, roomCH, wallEffHeight, lenOf, cabHOf, cabFaceOf, qtyOf, shapeLabel,
            roomRows, computePropertyTotals, computeInsulationRemoval, computeEquipment, computeContainmentZones,
            round2, buildExport, mkFlag };
 }

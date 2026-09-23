@@ -96,6 +96,7 @@ export default function App() {
   const [wallCornice, setWallCornice] = useState(false);
   const [wallSkirting, setWallSkirting] = useState(false);
   const [wallSkirtingOnly, setWallSkirtingOnly] = useState(false);
+  const [wallInsulation, setWallInsulation] = useState(false);   // v7.5 item 3 — default for NEW wall lines
   const [roofInsulation, setRoofInsulation] = useState(false);
   const [roofInsulationType, setRoofInsulationType] = useState("batts");
   const [cabHgt, setCabHgt] = useState("");        // default cabH for NEW cabinetry shapes: "" | "0.9" | "2.1" | "2.4" | "custom"
@@ -174,7 +175,7 @@ export default function App() {
   const setScale = (v) => patchFloor(activeFloor, (f) => ({ scale: typeof v === "function" ? v(f.scale) : v }));
   // v7.5 — all quantity maths lives in quantities.js (pure; shared with the headless re-export).
   const Q = makeQuantities({ jobName, rooms, shapes, markers, floors, activeFloor, property });
-  const { scaleOf, fmt, roomCH, lenOf, cabHOf, qtyOf, shapeLabel, roomRows, computePropertyTotals,
+  const { scaleOf, wallInsulationOn, fmt, roomCH, lenOf, cabHOf, qtyOf, shapeLabel, roomRows, computePropertyTotals,
           computeInsulationRemoval, computeEquipment, round2, buildExport } = Q;
 
   // ---------- home: load job index ----------
@@ -494,7 +495,8 @@ export default function App() {
             // v7.1 — the chip's covering default now actually lands on the shape (v7.0 omitted this)
             ...(cat.id === "floor_strip" ? { floorCov } : {}) }
         : { id: nid(), type: "line", cat: cat.id, room: roomForShape, floorId: activeFloor, x1: pt.x, y1: pt.y, x2: pt.x, y2: pt.y,
-            ...(cat.id === "wall_strip" ? { hgt: wallHgt, cornice: wallCornice, skirting: wallSkirting, skirtingOnly: wallSkirtingOnly } : {}) };
+            ...(cat.id === "wall_strip" ? { hgt: wallHgt, cornice: wallCornice, skirting: wallSkirting, skirtingOnly: wallSkirtingOnly,
+                                           insulationRemoval: wallInsulation && !wallSkirtingOnly } : {}) };
       setShapes((a) => [...a, s]);
       drag.current = { mode: "new", id: s.id, sx: pt.x, sy: pt.y };
       return;
@@ -683,6 +685,7 @@ export default function App() {
       if (row.wallLinm) lines.push({ label: "Wall strip", text: `${fmt(row.wallLinm)} lm → ${fmt(row.counts.wall_strip)} m²` });
       if (row.corniceLinm) lines.push({ label: "Cornice removal", text: `${fmt(row.corniceLinm)} lm` });
       if (row.skirtingLinm) lines.push({ label: "Skirting removal", text: `${fmt(row.skirtingLinm)} lm` });
+      if (row.wallInsulM2 > 0) lines.push({ label: "Wall insulation removal", text: `${fmt(row.wallInsulM2)} m²` });   // v7.5 item 3
       return lines;
     }
     // v4.0 — Condition 2 is NETTED; the headline IS the priced figure. Shown even when
@@ -792,6 +795,9 @@ export default function App() {
       else if (c.id === "wall_strip") text = `${fmt(round2(sum(cs, qtyOf)))} m² · ${fmt(round2(sum(cs.filter((s) => !s.skirtingOnly), lenOf)))} Lm`;
       else text = `${fmt(round2(sum(cs, qtyOf)))} m²`;
       out.push({ color: c.color, kind: c.kind, label: c.label, text });
+      // v7.5 item 3 — the insulation-flagged wall strip gets its own swatch variant + line
+      const ins = c.id === "wall_strip" ? cs.filter(wallInsulationOn) : [];
+      if (ins.length) out.push({ color: c.color, kind: "line", insulation: true, label: "Wall strip + cavity insulation removal", text: `${fmt(round2(sum(ins, qtyOf)))} m²` });
     }
     return out;
   };
@@ -861,6 +867,11 @@ export default function App() {
           g.setLineDash(s.skirtingOnly ? [fs / 2, fs / 3] : []);
           g.beginPath(); g.moveTo(s.x1, s.y1); g.lineTo(s.x2, s.y2); g.stroke();
           g.setLineDash([]);
+          if (wallInsulationOn(s)) {   // v7.5 item 3 — same dashed inner stroke as on screen
+            g.strokeStyle = "#fff"; g.lineWidth = Math.max(1, fs / 11); g.setLineDash([fs / 2.5, fs / 3.5]);
+            g.beginPath(); g.moveTo(s.x1, s.y1); g.lineTo(s.x2, s.y2); g.stroke();
+            g.setLineDash([]);
+          }
         }
       }
       // v7.0 item 8 — equipment markers, sized relative to the plan (not the on-screen constant)
@@ -893,6 +904,11 @@ export default function App() {
           g.fillRect(cx, cy + Math.round(fs * 0.2), sw, e.kind === "line" ? Math.round(fs * 0.35) : sw);
           g.strokeStyle = e.color; g.lineWidth = 1.5;
           g.strokeRect(cx, cy + Math.round(fs * 0.2), sw, e.kind === "line" ? Math.round(fs * 0.35) : sw);
+          if (e.insulation) {   // v7.5 item 3 — dashed white inner stroke, as on the plan
+            const my = cy + Math.round(fs * 0.2) + Math.round(fs * 0.175);
+            g.strokeStyle = "#fff"; g.lineWidth = Math.max(1, fs / 11); g.setLineDash([fs / 4, fs / 6]);
+            g.beginPath(); g.moveTo(cx, my); g.lineTo(cx + sw, my); g.stroke(); g.setLineDash([]);
+          }
         }
         g.fillStyle = "#111"; g.font = `${Math.round(fs * 0.92)}px system-ui, sans-serif`;
         g.fillText(e.label, cx + sw + Math.round(fs * 0.6), cy + Math.round(fs * 0.15));
@@ -1476,6 +1492,10 @@ export default function App() {
                   <label style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 11.5 }}>
                     <input type="checkbox" checked={wallSkirtingOnly} onChange={(e) => setWallSkirtingOnly(e.target.checked)} /> Skirting only (no wall lining)
                   </label>
+                  {/* v7.5 item 3 — a skirting-only removal never opens the cavity */}
+                  <label style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 11.5 }}>
+                    <input type="checkbox" checked={wallInsulation && !wallSkirtingOnly} disabled={wallSkirtingOnly} onChange={(e) => setWallInsulation(e.target.checked)} /> Remove insulation from wall cavity
+                  </label>
                 </div>
               )}
               {/* v6.0 — which roof void room new roof-void shapes bind to. Only needed when the
@@ -1586,7 +1606,12 @@ export default function App() {
                       </label>
                       <label style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 11.5 }}>
                         <input type="checkbox" checked={!!sel.skirtingOnly}
-                          onChange={(e) => { pushUndo(); const v = e.target.checked; setShapes((a) => a.map((s) => s.id === sel.id ? { ...s, skirtingOnly: v } : s)); }} /> Skirting only
+                          onChange={(e) => { pushUndo(); const v = e.target.checked; setShapes((a) => a.map((s) => s.id === sel.id ? { ...s, skirtingOnly: v, ...(v ? { insulationRemoval: false } : {}) } : s)); }} /> Skirting only
+                      </label>
+                      {/* v7.5 item 3 — wall-cavity insulation on THIS line (disabled + false on skirting-only) */}
+                      <label style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 11.5 }}>
+                        <input type="checkbox" checked={wallInsulationOn(sel)} disabled={!!sel.skirtingOnly}
+                          onChange={(e) => { pushUndo(); const v = e.target.checked; setShapes((a) => a.map((s) => s.id === sel.id ? { ...s, insulationRemoval: v } : s)); }} /> Remove insulation from wall cavity
                       </label>
                     </>
                   )}
@@ -1962,6 +1987,11 @@ export default function App() {
                       <line x1={s.x1} y1={s.y1} x2={s.x2} y2={s.y2}
                         stroke={c.color} strokeWidth={(isSel ? 5 : 3.5) / zoom} strokeLinecap="round"
                         strokeDasharray={s.skirtingOnly ? `${6 / zoom} ${4 / zoom}` : undefined} />
+                    )}
+                    {/* v7.5 item 3 — wall strip + cavity insulation: dashed white inner stroke */}
+                    {s.type === "line" && wallInsulationOn(s) && (
+                      <line x1={s.x1} y1={s.y1} x2={s.x2} y2={s.y2} stroke="#fff" strokeWidth={1.3 / zoom}
+                        strokeDasharray={`${4 / zoom} ${3 / zoom}`} style={{ pointerEvents: "none" }} />
                     )}
                     {scale && (
                       <text x={s.type === "rect" ? s.x + s.w / 2 : (s.x1 + s.x2) / 2}
