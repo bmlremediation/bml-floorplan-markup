@@ -28,3 +28,12 @@ test("C2 with no strip and net > 0 raises no C2 flag", () => {
   const e = exportFromProject(j.p);
   assert.ok(!e.flags.some((f) => f.code.startsWith("C2_NET")));
 });
+
+test("v7.5 version handshake: source bumped, v7_5_model present, markup_convention unchanged", async () => {
+  const { project } = await import("./fixtures.mjs");
+  const j = project(); j.rect("condition2", j.room("A"), 0, 0, 2, 2);
+  const e = exportFromProject(j.p);
+  assert.equal(e.source, "bml-floorplan-markup v7.5");
+  assert.match(e.v7_5_model, /^v7\.5 \(CO-2026-09-22-MARKUP\) — ADDITIVE ONLY/);
+  assert.equal(e.markup_convention, "BML v7.0 — MULTI-FLOOR; C2 NETTED; INSULATION DE-DUPLICATED; EQUIPMENT MARKERS; FLOOR COVERINGS");
+});
