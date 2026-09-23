@@ -315,7 +315,7 @@ export function makeQuantities({ jobName = "", rooms = [], shapes = [], markers 
   const shapeLabel = (s) => {
     const sc = scaleOf(s);
     if (!sc) return "no scale";
-    if (s.cat === "containment") return "containment";
+    if (s.cat === "containment") return `${fmt(lenOf(s))} m`;   // v7.5 item 5 — eyeball the > 1.5 m cut
     if (s.cat === "wall_strip" && s.skirtingOnly) return `${fmt(lenOf(s))} m skirting`;
     const q = qtyOf(s);
     if (s.cat === "cabinetry") {
@@ -390,7 +390,19 @@ export function makeQuantities({ jobName = "", rooms = [], shapes = [], markers 
       }
       for (const c of CATS) {
         const cs = rs.filter((s) => s.cat === c.id);
-        if (c.id === "containment") { row.counts[c.id] = cs.length; continue; }
+        if (c.id === "containment") {
+          row.counts[c.id] = cs.length;
+          // v7.5 item 5 — every drawn barrier's LENGTH (the > 1.5 m large-format discriminator),
+          // at the barrier's OWN floor calibration. One entry per barrier, always, so
+          // len(containment_barriers) == containment_count: an uncalibrated barrier exports
+          // length_m null (+ CONTAINMENT_LENGTH_MISSING), never dropped.
+          row.barriers = cs.map((s) => ({
+            length_m: scaleOf(s) ? round2(lenOf(s)) : null,
+            id: s.id,
+            floor: floors.find((f) => f.id === (s.floorId ?? activeFloor))?.name || "",
+          }));
+          continue;
+        }
         if (c.id === "wall_strip") {
           row.counts[c.id] = cs.reduce((a, s) => a + (qtyOf(s) || 0), 0); // m² (0 for skirting-only)
           row.wallLinm = cs.filter((s) => !s.skirtingOnly).reduce((a, s) => a + (lenOf(s) || 0), 0);
@@ -755,6 +767,7 @@ export function makeQuantities({ jobName = "", rooms = [], shapes = [], markers 
         wall_insulation_removal_m2: round2(r.wallInsulM2 || 0),
         cornice_linm: round2(r.corniceLinm), skirting_linm: round2(r.skirtingLinm),
         containment_count: r.counts.containment,
+        containment_barriers: r.barriers || [],   // v7.5 item 5 — [{length_m, id, floor}], len == containment_count
         // v7.0 item 1 — floor covering (detail verbatim from the selector; type is the 3-class
         // enum quantify already consumes). null when no floor-strip in the room or none chosen.
         floor_covering_detail: r.floorCovDetail,
@@ -941,6 +954,11 @@ export function makeQuantities({ jobName = "", rooms = [], shapes = [], markers 
         ...roomRows().filter((r) => r.any && r.c2 && r.c2.shapes.length && !r.chSet)
           .map((r) => mkFlag("C2_NO_CEILING_HEIGHT", "ERROR",
             `ERROR — ${r.name}: Condition 2 zone drawn with NO ceiling height set. The surface has been computed at the 2.4 m default — set the real height or confirm 2.4 is correct.`,
+            { room: r.name, floor: floors.find((f) => f.id === r.floorId)?.name || "" })),
+        // v7.5 item 5 — a barrier whose length cannot be computed (its floor is uncalibrated).
+        ...exportRows.filter((r) => (r.barriers || []).some((b) => b.length_m == null))
+          .map((r) => mkFlag("CONTAINMENT_LENGTH_MISSING", "FLAG",
+            `FLAG — ${r.name}: ${r.barriers.filter((b) => b.length_m == null).length} containment barrier(s) have NO LENGTH (the floor is not calibrated). They export length_m null and will price as STANDARD — calibrate the floor so the > 1.5 m large-format cut can be applied.`,
             { room: r.name, floor: floors.find((f) => f.id === r.floorId)?.name || "" })),
         ...roomRows().filter((r) => r.cabMissingH)
           .map((r) => mkFlag("CABINETRY_NO_HEIGHT", "ERROR",
