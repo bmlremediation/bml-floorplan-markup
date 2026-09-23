@@ -10,7 +10,7 @@ import iconSplitAcDecomm from "./assets/icon_split_ac_decommission.png";
 import iconAfd from "./assets/icon_afd.png";
 import iconDehum from "./assets/icon_dehumidifier.png";
 import iconDrymatic from "./assets/icon_drymatic_boost.png";
-import { CATS, catById, INSULATION_CATS, DEFAULT_PROPERTY, FLOOR_COVERINGS, floorCovById, MARKER_KINDS as MARKER_KINDS_BASE,
+import { CATS, LEFT_BAR_CATS, catById, INSULATION_CATS, DEFAULT_PROPERTY, FLOOR_COVERINGS, floorCovById, MARKER_KINDS as MARKER_KINDS_BASE,
          FIRST_FLOOR_ID, newFloor, migrateFloors, migrateProperty, migrateProjectFile, APP_VERSION, makeQuantities } from "./quantities.js";
 
 const FILL_OPACITY = 0.35;
@@ -778,7 +778,7 @@ export default function App() {
   const scopeLegendEntries = (fid, fShapes) => {
     const rowsF = roomRows().filter((r) => r.floorId === fid);
     const out = [];
-    for (const c of CATS) {
+    for (const c of LEFT_BAR_CATS) {   // v7.5 item 2 — legend follows the left-bar order
       const cs = fShapes.filter((s) => s.cat === c.id);
       if (!cs.length) continue;
       const sum = (arr, fn) => arr.reduce((a, s) => a + (fn(s) || 0), 0);
@@ -940,7 +940,7 @@ export default function App() {
     const fMarkers = markers.filter((m) => (m.floorId ?? fid) === fid);
     if (!fShapes.length && !fMarkers.length) { alert("Nothing is marked up on this floor yet."); return; }
     const overlays = [
-      ...CATS.filter((c) => fShapes.some((s) => s.cat === c.id)).map((c) => ({ id: c.id, suffix: c.id })),
+      ...LEFT_BAR_CATS.filter((c) => fShapes.some((s) => s.cat === c.id)).map((c) => ({ id: c.id, suffix: c.id })),
       ...(fMarkers.length ? [{ id: "equipment", suffix: "equipment" }] : []),
       { id: "ALL", suffix: "ALL" },
     ];
@@ -1435,7 +1435,7 @@ export default function App() {
           {!collapsed.markup && (
             <>
               <div style={st.chips}>
-                {CATS.map((c) => (
+                {LEFT_BAR_CATS.map((c) => (
                   <button key={c.id} style={chip(c, tool === "draw" && activeCat === c.id)}
                     onClick={() => { setActiveCat(c.id); setTool("draw"); }} disabled={!img}>
                     <span style={{ ...st.swatch, background: c.color, opacity: (c.kind === "fill" ? 0.8 : 1) * (hiddenCats.has(c.id) ? 0.35 : 1), height: c.kind === "line" ? 3 : 12 }} />

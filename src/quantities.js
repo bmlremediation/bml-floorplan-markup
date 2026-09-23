@@ -24,6 +24,11 @@ export const CATS = [
   { id: "floor_protection", label: "Floor protection",                          kind: "fill", color: "#9E9E9E", propertyScope: true },
 ];
 export const catById = (id) => CATS.find((c) => c.id === id);
+// v7.5 item 2 (CO-2026-09-22-MARKUP) — LEFT-BAR order: Condition 2 first (it is drawn first on
+// almost every job — it defines the zone the strip items sit inside), every other item in its
+// v7.4 order. PRESENTATION ONLY: CATS itself is untouched, so shape-type ids, every quantity
+// loop and the export key order are exactly as before. The scope-image legend follows this order.
+export const LEFT_BAR_CATS = [catById("condition2"), ...CATS.filter((c) => c.id !== "condition2")];
 // v6.0 item 3 — categories that can carry an insulation-removal flag. A strip-ceiling and a
 // roof-void shape routinely cover the SAME void from two directions; where both are flagged the
 // overlap must be counted ONCE (see computeInsulationRemoval).
