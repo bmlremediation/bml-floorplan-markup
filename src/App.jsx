@@ -11,7 +11,7 @@ import iconAfd from "./assets/icon_afd.png";
 import iconDehum from "./assets/icon_dehumidifier.png";
 import iconDrymatic from "./assets/icon_drymatic_boost.png";
 import { CATS, LEFT_BAR_CATS, catById, keepDrawnShape, INSULATION_CATS, DEFAULT_PROPERTY, FLOOR_COVERINGS, floorCovById, MARKER_KINDS as MARKER_KINDS_BASE,
-         FIRST_FLOOR_ID, newFloor, migrateFloors, migrateProperty, migrateProjectFile, APP_VERSION, makeQuantities } from "./quantities.js";
+         FIRST_FLOOR_ID, newFloor, migrateFloors, migrateProperty, migrateProjectFile, reexportFromProject, ReexportError, APP_VERSION, makeQuantities } from "./quantities.js";
 
 const FILL_OPACITY = 0.35;
 
@@ -1070,6 +1070,42 @@ export default function App() {
     } catch { alert("Not a valid BML markup project file / JSON."); }
   };
 
+  // v7.5 item 8 — Open PROJECT.json → Export quantities, in one step. The file is migrated and
+  // recomputed headlessly (quantities.js); the editor, the open job and IndexedDB are NOT touched,
+  // so this is safe from the home screen or mid-job. A file that cannot be quantified (no
+  // calibration / no plan) is refused with the reason — no partial file is ever written.
+  const reexportFromFile = (file) => {
+    if (!file) return;
+    const r = new FileReader();
+    r.onload = () => {
+      try {
+        const { exp, state } = reexportFromProject(r.result);
+        const filename = `${(state.jobName || "job").replace(/\s+/g, "_")}_markup_quantities.json`;
+        const text = JSON.stringify(exp, null, 2);
+        downloadFile(filename, text);
+        setCopyMsg("");
+        const errs = exp.flags.filter((f) => f.severity === "ERROR").length;
+        setExportModal({
+          title: "Quantities JSON — re-exported from PROJECT file",
+          hint: `Recomputed from ${file.name} (saved ${exp.project_saved_at ? new Date(exp.project_saved_at).toLocaleString("en-AU") : "— no timestamp in file"}) and downloaded as ${filename}. Marked reexported_from_project: true. ${exp.flags.length} flag(s)${errs ? `, ${errs} ERROR` : ""} — see flags[]. Nothing was loaded into the editor.`,
+          text, filename,
+        });
+        if (state.convertedFullStrip) alert("This PROJECT file predates v3.1: its full-strip shapes were read as floor strip (overlay ceiling separately). They carry no floor covering, so the export hard-errors FLOOR_COVERING_NOT_SET until the file is re-marked.");
+      } catch (err) {
+        alert(err instanceof ReexportError ? err.message : `Could not re-export this file: ${err?.message || err}`);
+      }
+    };
+    r.readAsText(file);
+  };
+  const reexportPicker = (label, style) => (
+    <label style={{ ...btn(false), textAlign: "center", cursor: "pointer", ...style }}
+      title="Pick a *_markup_PROJECT.json: every quantity is recomputed and a quantities JSON downloads. The open job is not touched.">
+      {label}
+      <input type="file" accept=".json,application/json" data-testid="reexport-input" style={{ display: "none" }}
+        onChange={(e) => { reexportFromFile(e.target.files[0]); e.target.value = ""; }} />
+    </label>
+  );
+
   const importFromFile = (file) => {
     if (!file) return;
     const r = new FileReader();
@@ -1246,6 +1282,7 @@ export default function App() {
           <button style={{ ...btn(false), padding: "12px" }} onClick={() => { setCopyMsg(""); setImportOpen(true); }}>
             Import project (paste JSON or pick file)
           </button>
+          {reexportPicker("Open PROJECT.json → Export quantities", { padding: "12px" })}
           <div style={{ ...st.row, justifyContent: "space-between" }}>
             <div style={st.h}>Saved jobs ({index.length})</div>
             <input style={{ ...st.input, padding: "5px 8px", fontSize: 12, width: 200 }} placeholder="Search job no. or name…"
@@ -1966,6 +2003,7 @@ export default function App() {
               Import project
             </button>
           </div>
+          {reexportPicker("Open PROJECT.json → Export quantities")}
           <div style={st.meta}>Project JSON = markup backup (no image — you re-load the plan on import). Save it as [Job]_markup_PROJECT.json in the Drive job folder at the end of every session — this is the durable, cross-device record. Autosave (IndexedDB) is per-browser/per-device convenience only.</div>
           <div style={st.meta}>Quantities only — this tool never applies rates or pricing. Any pricing engine consumes the exported JSON.</div>
           <div style={{ ...st.meta, textAlign: "right" }}>{versionStamp}</div>

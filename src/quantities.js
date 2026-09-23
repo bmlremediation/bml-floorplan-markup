@@ -163,9 +163,40 @@ export function migrateProjectFile(d) {
     return out;
   });
   // v5.0 — same in-memory migration as openJob; a v2/v3/v4 project file becomes one floor.
-  const mig = migrateFloors({ ...d, shapes });
+  // v2.1 files embed the image and record its size only on img.{w,h}
+  const mig = migrateFloors({ ...d, shapes, imgW: d.imgW || d.img?.w || 0, imgH: d.imgH || d.img?.h || 0 });
   const activeFloor = d.activeFloor && mig.floors.some((f) => f.id === d.activeFloor) ? d.activeFloor : mig.floors[0].id;
   return { ...mig, activeFloor, jobName: d.jobName || "", property: migrateProperty(d.property), convertedFullStrip };
+}
+
+// ---------- v7.5 item 8 — re-export quantities from a PROJECT file ----------
+// The PROJECT file is the durable record; this turns it back into a quantities export without
+// anyone redrawing. RECOMPUTED through the same migration + makeQuantities().buildExport() path as
+// a live export — never copied from anything stored — so it carries the current version's keys.
+// Refuses (throws, naming what is missing) rather than write a partial file when a floor that
+// carries markup has no calibration, or no plan behind it. PROJECT files are markup-only by design
+// since v2.3 (image_embedded:false), so "plan present" means an embedded image OR the recorded plan
+// size the markup was drawn against (floors[].imgW/imgH, or the top-level imgW/imgH on
+// single-floor files) — the quantities themselves depend only on the calibration.
+export class ReexportError extends Error {}
+export function reexportFromProject(raw) {
+  let d;
+  try { d = typeof raw === "string" ? JSON.parse(raw) : raw; } catch { throw new ReexportError("Not valid JSON — pick a *_markup_PROJECT.json file."); }
+  if (!d || d.format !== "bml-markup-project") throw new ReexportError('Not a BML markup PROJECT file (format is not "bml-markup-project").');
+  const state = migrateProjectFile(d);
+  const hasMarkup = (fid) => state.shapes.some((s) => s.floorId === fid) || state.markers.some((m) => m.floorId === fid) || state.rooms.some((r) => r.floorId === fid);
+  const embedded = !!d.img?.src;
+  const problems = [];
+  if (!state.shapes.length && !state.markers.length) problems.push("the file contains no markup (no shapes or markers)");
+  state.floors.forEach((f, i) => {
+    if (!hasMarkup(f.id)) return;
+    const label = f.name?.trim() ? `floor "${f.name.trim()}"` : `floor ${i + 1} (unlabelled)`;
+    if (!f.scale) problems.push(`${label} has markup but NO CALIBRATION`);
+    if (!embedded && !(f.imgW > 0 && f.imgH > 0)) problems.push(`${label} has markup but NO PLAN IMAGE (none embedded and no recorded plan size)`);
+  });
+  if (problems.length) throw new ReexportError(`Cannot re-export — ${problems.join("; ")}. No file was written.`);
+  const exp = makeQuantities(state).buildExport({ reexportedFromProject: true, projectSavedAt: d.savedAt || null });
+  return { exp, state };
 }
 
 // v7.5 item 4 — draw-end guard. Its ONLY purpose is to swallow accidental clicks (a click with a
@@ -712,7 +743,7 @@ export function makeQuantities({ jobName = "", rooms = [], shapes = [], markers 
 
   // ---------- export (real downloads — self-hosted, no sandbox; copy/paste modal kept for Cowork paste-in) ----------
   const round2 = (v) => Math.round(v * 100) / 100;
-  const buildExport = () => {
+  const buildExport = ({ reexportedFromProject = false, projectSavedAt = null } = {}) => {
     const exportRows = roomRows().filter((r) => !r.isUnassigned || r.any);
     const pt = computePropertyTotals();
     const ins = computeInsulationRemoval();
@@ -727,6 +758,10 @@ export function makeQuantities({ jobName = "", rooms = [], shapes = [], markers 
       job: jobName || "UNNAMED JOB",
       exported_at: new Date().toISOString(),
       source: `bml-floorplan-markup ${APP_VERSION}`,
+      // v7.5 item 8 — provenance: a basis regenerated from a PROJECT file is distinguishable
+      // from a live export. project_saved_at is the PROJECT file's own savedAt (null if absent).
+      reexported_from_project: reexportedFromProject,
+      project_saved_at: reexportedFromProject ? projectSavedAt : null,
       pricing: "QUANTITIES ONLY — this tool never applies rates or pricing. Any pricing engine consumes this JSON.",
       calibration: scale ? { scale_m_per_px: scale, reference_px: calPx, reference_m: calPx * scale } : null,
       // v5.0 — every floor's own calibration. Rooms reference a floor by its TYPED label.
