@@ -163,6 +163,20 @@ export function migrateProjectFile(d) {
   return { ...mig, activeFloor, jobName: d.jobName || "", property: migrateProperty(d.property), convertedFullStrip };
 }
 
+// v7.5 item 4 — draw-end guard. Its ONLY purpose is to swallow accidental clicks (a click with a
+// draw tool produces a zero / sub-pixel drag). v7.4 used 4 RAW IMAGE px for every type, which on a
+// typical plan (~14 mm/px) silently discarded any shape under ~55 mm wide — thin contingent strips
+// vanished on mouse-up. Now: a CONTINGENT shape persists whenever both dimensions are > 0 (no
+// minimum at all); every other type is discarded only when a dimension is under 1 SCREEN px at the
+// current zoom, which is exactly what a click produces.
+export const CLICK_GUARD_SCREEN_PX = 1;
+export const keepDrawnShape = (s, zoom) => {
+  if (!s) return false;
+  if (s.type === "rect" && s.cat === "contingent") return s.w > 0 && s.h > 0;
+  const min = CLICK_GUARD_SCREEN_PX / zoom;   // image px
+  return s.type === "rect" ? (s.w >= min && s.h >= min) : Math.hypot(s.x2 - s.x1, s.y2 - s.y1) >= min;
+};
+
 export const APP_VERSION = "v7.4";
 
 // ---------- edge snapping (v4.2) ----------
@@ -512,6 +526,17 @@ export function makeQuantities({ jobName = "", rooms = [], shapes = [], markers 
             }).join(" + ") + ` = ${round2(row.counts.cabinetry)} m² face`
           : "no cabinetry drawn",
       };
+      // v7.5 item 4 — contingent working, mirroring the cabinetry / condition2 blocks, so a thin
+      // strip is auditable in the export and not only as a total. m2 is the same plain sum as
+      // contingent_m2 (unchanged in meaning).
+      const contShapes = rs.filter((s) => s.cat === "contingent");
+      row.contWorking = {
+        shapes: contShapes.map((s) => ({ w: round2(s.w * rowScale), l: round2(s.h * rowScale), m2: round2(qtyOf(s) || 0) })),
+        m2: round2(row.counts.contingent || 0),
+        working: contShapes.length
+          ? contShapes.map((s) => `(${round2(s.w * rowScale)}×${round2(s.h * rowScale)})`).join(" + ") + ` = ${round2(row.counts.contingent || 0)} m²`
+          : "no contingent drawn",
+      };
       // v5.0 — a VOID ROOM carries its own decon + insulation rather than feeding the job-wide
       // bucket. Batts and blown-in are reported separately: different removal rates.
       if (isVoid) {
@@ -722,6 +747,7 @@ export function makeQuantities({ jobName = "", rooms = [], shapes = [], markers 
         cabinetry_footprint_m2: round2(r.cabFootprint || 0),   // audit only — never priced
         cabinetry: r.cabWorking || null,
         contingent_m2: round2(r.counts.contingent),
+        contingent: r.contWorking,   // v7.5 item 4 — {shapes:[{w,l,m2}], m2, working}
         wall_strip_linm: round2(r.wallLinm), wall_strip_m2: round2(r.counts.wall_strip),
         wall_strip: r.wallWorking || null,
         // v7.5 item 3 — wall-CAVITY insulation removal (sum of the flagged lines' m²). Never part of

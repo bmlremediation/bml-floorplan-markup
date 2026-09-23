@@ -10,11 +10,10 @@ import iconSplitAcDecomm from "./assets/icon_split_ac_decommission.png";
 import iconAfd from "./assets/icon_afd.png";
 import iconDehum from "./assets/icon_dehumidifier.png";
 import iconDrymatic from "./assets/icon_drymatic_boost.png";
-import { CATS, LEFT_BAR_CATS, catById, INSULATION_CATS, DEFAULT_PROPERTY, FLOOR_COVERINGS, floorCovById, MARKER_KINDS as MARKER_KINDS_BASE,
+import { CATS, LEFT_BAR_CATS, catById, keepDrawnShape, INSULATION_CATS, DEFAULT_PROPERTY, FLOOR_COVERINGS, floorCovById, MARKER_KINDS as MARKER_KINDS_BASE,
          FIRST_FLOOR_ID, newFloor, migrateFloors, migrateProperty, migrateProjectFile, APP_VERSION, makeQuantities } from "./quantities.js";
 
 const FILL_OPACITY = 0.35;
-const MIN_PX = 4;
 
 // Wall-strip removal-height options. 'full' means "use the room's ceiling height".
 const HEIGHTS = [
@@ -567,7 +566,7 @@ export default function App() {
       // Decide keep/discard from the live drag geometry so the selection can be set outside
       // the updater (updaters must stay pure).
       const cur = shapes.find((s) => s.id === d.id);
-      const ok = cur && (cur.type === "rect" ? (cur.w > MIN_PX && cur.h > MIN_PX) : Math.hypot(cur.x2 - cur.x1, cur.y2 - cur.y1) > MIN_PX);
+      const ok = keepDrawnShape(cur, zoom);   // v7.5 item 4
       if (!ok) { setShapes((a) => a.filter((s) => s.id !== d.id)); setUndoStack((u) => u.slice(0, -1)); }
       // v7.1 — a freshly drawn shape becomes the selection so its covering / height / zone can
       // be set immediately. The draw tool stays active so consecutive shapes still work.
