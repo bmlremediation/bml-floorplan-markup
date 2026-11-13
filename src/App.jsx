@@ -11,7 +11,7 @@ import iconAfd from "./assets/icon_afd.png";
 import iconDehum from "./assets/icon_dehumidifier.png";
 import iconDrymatic from "./assets/icon_drymatic_boost.png";
 import { CATS, LEFT_BAR_CATS, catById, keepDrawnShape, INSULATION_CATS, DEFAULT_PROPERTY, FLOOR_COVERINGS, floorCovById, MARKER_KINDS as MARKER_KINDS_BASE,
-         FIRST_FLOOR_ID, newFloor, migrateFloors, migrateProperty, migrateProjectFile, reexportFromProject, ReexportError, APP_VERSION, makeQuantities } from "./quantities.js";
+         FIRST_FLOOR_ID, newFloor, migrateFloors, migrateProperty, migrateProjectFile, reexportFromProject, ReexportError, APP_VERSION, makeQuantities, inventoryOfProperty } from "./quantities.js";
 
 const FILL_OPACITY = 0.35;
 
@@ -1323,7 +1323,7 @@ export default function App() {
     parseFloat(property.air_mover_units) > 0 ||
     parseFloat(property.dbkii_days) > 0 || parseFloat(property.ac_ducted_units) > 0 ||
     parseFloat(property.ac_duct_removal_rooms) > 0 ||
-    parseFloat(property.prv_areas) > 0 || property.contents_packout || property.contents_inventory ||
+    parseFloat(property.prv_areas) > 0 || property.contents_packout || inventoryOfProperty(property) ||
     property.skip_bin || property.asbestos_testing || property.contents_storage !== "none";
 
   // ================= EDITOR =================
@@ -1823,9 +1823,16 @@ export default function App() {
               )}
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 3 }}>
                 {propCheckField("Contents packout", "contents_packout")}
-                {propCheckField("Contents inventory", "contents_inventory")}
                 {propCheckField("Skip bin", "skip_bin")}
                 {propCheckField("Asbestos testing", "asbestos_testing")}
+              </div>
+              <div style={st.row}>
+                <span style={st.meta}>Contents inventory:</span>
+                <select style={{ ...st.selectEl, flex: 1 }} value={inventoryOfProperty(property)} onChange={(e) => setProp("contents_inventory", e.target.value)}>
+                  <option value="">not selected</option>
+                  <option value="included">included (base price)</option>
+                  <option value="optional">optional</option>
+                </select>
               </div>
               <div style={st.row}>
                 <span style={st.meta}>Contents storage:</span>
@@ -1960,7 +1967,7 @@ export default function App() {
                   {parseFloat(property.ac_ducted_units) > 0 && qline("AC ducted decontamination", property.ac_ducted_units)}
                   {parseFloat(property.ac_duct_removal_rooms) > 0 && qline("AC duct removal (rooms)", property.ac_duct_removal_rooms)}
                   {property.contents_packout && qline("Contents packout", "✓")}
-                  {property.contents_inventory && qline("Contents inventory", "✓")}
+                  {inventoryOfProperty(property) && qline("Contents inventory", inventoryOfProperty(property))}
                   {property.contents_storage !== "none" && qline("Contents storage", property.contents_storage)}
                   {property.skip_bin && qline("Skip bin", "✓")}
                   {property.asbestos_testing && qline("Asbestos testing", "✓")}
