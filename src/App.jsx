@@ -1826,6 +1826,7 @@ export default function App() {
                 {propCheckField("Skip bin", "skip_bin")}
                 {propCheckField("Asbestos testing", "asbestos_testing")}
               </div>
+              {property.asbestos_testing && propNumField("Asbestos tests (count)", "asbestos_tests")}
               <div style={st.row}>
                 <span style={st.meta}>Contents inventory:</span>
                 <select style={{ ...st.selectEl, flex: 1 }} value={inventoryOfProperty(property)} onChange={(e) => setProp("contents_inventory", e.target.value)}>
@@ -1970,7 +1971,7 @@ export default function App() {
                   {inventoryOfProperty(property) && qline("Contents inventory", inventoryOfProperty(property))}
                   {property.contents_storage !== "none" && qline("Contents storage", property.contents_storage)}
                   {property.skip_bin && qline("Skip bin", "✓")}
-                  {property.asbestos_testing && qline("Asbestos testing", "✓")}
+                  {property.asbestos_testing && qline("Asbestos testing", parseFloat(property.asbestos_tests) > 0 ? `${property.asbestos_tests} test(s)` : "count not set")}
                 </div>
               )}
               {shapes.length === 0 && !anyPropertyEntered && <div style={st.meta}>Nothing marked up yet.</div>}

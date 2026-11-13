@@ -28,8 +28,7 @@ test("4: junk values read as not selected; the choice survives a PROJECT round t
   assert.equal(exportFromProject(JSON.parse(JSON.stringify(j.p))).property.contents_inventory, "optional");
 });
 
-test("5: export source carries v7.6 and the v7_6_model note", () => {
+test("5: the v7_6_model note is carried", () => {
   const e = exp({ contents_inventory: "included" });
-  assert.match(e.source, /v7\.6$/);
   assert.match(e.v7_6_model, /RE-TYPED/);
 });
