@@ -55,7 +55,7 @@ export const DEFAULT_PROPERTY = {
   drymatic_days: "",
   air_mover_units: "", air_mover_days: "",
   ac_ducted_units: "", ac_duct_removal_rooms: "", prv_areas: "",
-  contents_packout: false, contents_inventory: false, skip_bin: false, asbestos_testing: false,
+  contents_packout: false, contents_inventory: false, skip_bin: false, asbestos_testing: false, asbestos_tests: "",
   contents_storage: "none", roof_void_mode: "all_surfaces",
   // v7.5 item 7 — Claims Hero job? true | false | null. REQUIRED choice with NO default: null until
   // Jordan picks Yes/No in the job header. NEVER inferred from the client / company / project name.
@@ -63,6 +63,15 @@ export const DEFAULT_PROPERTY = {
 };
 // v7.5 item 7 — only an explicit boolean counts; anything else is "not set".
 export const chOfProperty = (p) => (p?.ch === true || p?.ch === false ? p.ch : null);
+// v7.6 (Jordan 13 Nov 2026) — contents inventory is a three-way choice: "included" (priced in the
+// base), "optional" (an optional quote line) or "" (not selected). A job saved before v7.6 holds a
+// boolean: true reads as "included" (Jordan: a tick means base), false as not selected.
+export const inventoryOfProperty = (p) => {
+  const v = p?.contents_inventory;
+  if (v === true || v === "included") return "included";
+  if (v === "optional") return "optional";
+  return "";
+};
 // Legacy property keys carried invisibly so an old job NEVER silently loses a quantity on
 // re-export. Unit counts cannot be converted to markers (no positions) and drying-mat UNITS
 // cannot be converted to m² — so they ride along, export under equipment.legacy_* with a loud
@@ -213,7 +222,7 @@ export const keepDrawnShape = (s, zoom) => {
   return s.type === "rect" ? (s.w >= min && s.h >= min) : Math.hypot(s.x2 - s.x1, s.y2 - s.y1) >= min;
 };
 
-export const APP_VERSION = "v7.5";   // feeds the UI footer, export `source` and the scope-image footer
+export const APP_VERSION = "v7.7";   // feeds the UI footer, export `source` and the scope-image footer
 
 // ---------- edge snapping (v4.2) ----------
 // Shapes drawn by hand to visually abut are never numerically coincident. Measured on the real
@@ -783,6 +792,8 @@ export function makeQuantities({ jobName = "", rooms = [], shapes = [], markers 
       multifloor_model: "v5.0 — a job has FLOORS. floors[] carries each floor's own calibration; every room carries `floor` (the floor's TYPED label, never invented by the app — it may be \"\" if unlabelled) and `void_type`. PROPERTY SCOPE IS ENTERED ONCE PER JOB and is therefore already a combined total across every floor, including floor_protection_m2 — there is nothing to merge or de-duplicate, and a consumer must NOT attempt to. VOID ROOMS: void_type is `ceiling_void` (between an upper and a lower floor) or `roof_void` (between the top floor and the roof), and is ALWAYS an explicit human selection. Key off void_type ONLY — NEVER off the room name, which is free text: a room named \"understair void\" with void_type null is an ORDINARY room and is flagged, not reinterpreted. A void room carries decon_m2 + insulation_batts_m2 + insulation_blown_m2 + void_decon{} and is otherwise an ordinary room (own ceiling height, containment, strip). property.roof_void is GONE unless a legacy job still has roof-void shapes outside a void room, in which case it is present AND a hard ERROR flag is raised — never silently dropped.",
       condition2_model: "v5.0 — condition2_net_m2 is the PRICED figure and it is ALREADY NETTED. SURFACE: all Condition 2 shapes in a room are UNIONED (with near-coincident edges snapped within ~25 mm first, because shapes drawn by hand to abut are never numerically coincident — measured 12.9 mm and 19.3 mm on real markup — and an un-snapped union keeps the internal wall it exists to remove), then surface = 2 x union_area + union_perimeter x ceiling_height. Floor and ceiling are AREAS (2 x union area); walls are PERIMETER x height. The earlier footprint x (2 + H) form is DEAD: it multiplied the floor AREA by the height to get the wall term, which is only correct in a 4 x 4 m room — it under-read small rooms (1x1: -62%) and over-read large ones (10x10: +49%). NET: surface minus (wall_strip + ceiling_strip + floor_strip), because a stripped surface is already paid for twice (strip rate + cavity remediation) and must not be charged a third time as a Condition 2 clean. A per-shape height override (c2H) puts a shape in its own height group for double-height stairwells and raked ceilings. condition2_m2 is an ALIAS OF THE NET so no consumer can accidentally read the gross; the gross is condition2_surface_m2 (audit only). 'Full strip' no longer exists — floor_strip and ceiling_strip are separate overlays.",
       // v7.5 — ADDITIVE ONLY. markup_convention above is deliberately unchanged (still MAJOR 7).
+      v7_7_model: "v7.7 (Jordan 13 Nov 2026) — ADDITIVE: property.asbestos_tests (number) = how many asbestos identification tests when asbestos_testing is true, else 0. quantify_quote.py already reads it (asbestos_tests x asbestos_test_each; 0 = a quantity-0 line, count confirmed on site). Asbestos testing ticked with no count raises ASBESTOS_TEST_COUNT_NOT_SET (FLAG). markup_convention unchanged.",
+      v7_6_model: "v7.6 (Jordan 13 Nov 2026) — property.contents_inventory RE-TYPED from boolean to \"included\" | \"optional\" | false. \"included\" = the inventory is priced in the base; \"optional\" = an #OPTIONAL# quote line; false = not selected (engine spec 19 default: optional). A job saved before v7.6 with true exports \"included\". Engine readiness: quantify_quote.py inventory_mode() (engine v7.59) reads true, \"included\" and \"optional\". markup_convention unchanged.",
       v7_5_model: "v7.5 (CO-2026-09-22-MARKUP) — ADDITIVE ONLY: no key removed, renamed or re-typed; markup_convention unchanged. (1) numeric boxes commit as typed — behavioural, no schema change. (2) Condition 2 first in the left bar — presentation only. (3) WALL-CAVITY INSULATION: rooms[].wall_strip.lines[].insulation_removal (bool; always false on a skirting-only line), rooms[].wall_insulation_removal_m2 = sum of the flagged lines' m² (length × that line's removal height), property.wall_insulation_removal_m2 = sum over rooms. It is NEVER part of property.insulation_removal (roof-void / strip-ceiling horizontal planes, netted, batts vs blown split). (4) rooms[].contingent = {shapes:[{w,l,m2}], m2, working}; contingent_m2 unchanged; thin contingent shapes now persist. (5) rooms[].containment_barriers = [{length_m, id, floor}] with len == containment_count ALWAYS; length_m null (+ flag CONTAINMENT_LENGTH_MISSING) only where the barrier's floor is uncalibrated. (6) FULL-STRIP SIGNATURE — C2 drawn, net <= 0, wall_strip_m2 > 0 AND ceiling_strip_m2 > 0 (floor not required): condition2_net_m2 / condition2_m2 / condition2.net_m2 CLAMPED TO 0, rooms[].full_strip and condition2.full_strip true, flag C2_FULL_STRIP_SIGNATURE (FLAG); surface and deductions keep the true gross. Without the signature, net <= 0 still exports the real negative number with C2_NET_NOT_POSITIVE (ERROR), unchanged. (7) property.ch true|false|null and property.rate_variant 'ch'|'non_ch'|null — an explicit Yes/No in the job header, never inferred from a name; unset raises CH_FLAG_NOT_SET (FLAG). job stays a string; ac_variant is not written. (8) reexported_from_project (bool) and project_saved_at (the PROJECT file's savedAt, or null): true when this file was recomputed from a PROJECT file via 'Open PROJECT.json → Export quantities'. Flag severities use the app's existing vocabulary: ERROR = do not price; FLAG = non-blocking, a human confirms.",
       rooms: exportRows.map((r) => {
         const rEq = eq.byRoom.get(r.roomId ?? null) || null;
@@ -895,9 +906,12 @@ export function makeQuantities({ jobName = "", rooms = [], shapes = [], markers 
         // per-room containment_count is retained for backward compatibility).
         containment_zones: cz.zones,
         prv_areas: parseFloat(property.prv_areas) || 0,
-        contents_packout: !!property.contents_packout, contents_inventory: !!property.contents_inventory,
+        contents_packout: !!property.contents_packout, contents_inventory: inventoryOfProperty(property) || false,
         contents_storage: property.contents_storage,
         skip_bin: !!property.skip_bin, asbestos_testing: !!property.asbestos_testing,
+        // v7.7 — how many asbestos identification tests (suspect linings, pre-cutting). The engine prices
+        // asbestos_tests x asbestos_test_each; 0 = count to be confirmed on site (a quantity-0 line).
+        asbestos_tests: property.asbestos_testing ? (parseFloat(property.asbestos_tests) || 0) : 0,
         // v5.0 — the void is a ROOM. This block is OMITTED ENTIRELY on a clean job. It survives
         // only while a legacy job still has roof-void shapes sitting outside a void room, so that
         // migrating cannot silently drop a quantity; whenever it appears, a hard ERROR flag
@@ -928,6 +942,10 @@ export function makeQuantities({ jobName = "", rooms = [], shapes = [], markers 
         // v7.5 item 7 — the choice is required; export proceeds with ch: null, loudly.
         ...(chOfProperty(property) === null
           ? [mkFlag("CH_FLAG_NOT_SET", "FLAG", 'FLAG — "Claims Hero job?" is NOT SET in the job header (next to the job name). Exported as property.ch: null / rate_variant: null — the CH electrical and plumbing rates cannot be selected until you choose Yes or No. It is never inferred from the client or project name.')]
+          : []),
+        // v7.7 — testing ticked but no count: the quote can only carry a quantity-0 line.
+        ...(property.asbestos_testing && !(parseFloat(property.asbestos_tests) > 0)
+          ? [mkFlag("ASBESTOS_TEST_COUNT_NOT_SET", "FLAG", "FLAG — Asbestos testing is ticked but the number of tests is not set. Exported as asbestos_tests: 0, so the quote carries the test line at quantity 0 (count confirmed on site). Enter the count in Property scope.")]
           : []),
         ...(shapes.some((s) => s.room == null && !catById(s.cat)?.propertyScope)
           ? [mkFlag("UNASSIGNED_SHAPES", "ERROR", "UNASSIGNED shapes present — reassign before pricing")] : []),

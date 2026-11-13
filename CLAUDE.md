@@ -72,17 +72,20 @@ where local fixture plans/exports go.
 
 ## Where the specs live
 
-Drive, and only Drive:
-`C:\Users\jcahi\My Drive\GD Claude\Projects\BML Report Writing And Estimating Project\_Skill Masters\Floorplan Markup Quantify Quote Skill\`
-— change orders, `SKILL.md`, and the versioned `v<X>.0_engine_handoff\` folders (export contract +
-real fixture exports). The master pointer for the app source is
-`_Artifact and HTML App Masters\MASTER_POINTER.md`.
+The engine that consumes the export, and its markup skill, live in the BML engine repo
+(`C:\BML\engine-work`, git data `C:\BML\engine.git`), made live in Drive at
+`C:\Users\jcahi\My Drive\GD Claude\Projects\Reporting Estimating Project\05_Skill Masters\Floorplan Markup Quantify Quote Skill\`
+(`SKILL.md`, `scripts\quantify_quote.py`, `scripts\markup_export_check.py`). The contract check is
+`00_Engine\check_markup_app.py` in that repo. *(Updated 13 Nov 2026: the old "BML Report Writing And
+Estimating Project\_Skill Masters" path no longer exists.)*
 
 ## Governance split
 
-- **This repo** — app code. Owned by Claude Code sessions. Branch, test, hand back.
-- **PRC** (Cowork "Reporting / Estimating PRC") — owns change orders, `quantify_quote.py` and
-  `BML_Price_List.json`. Those files **never enter this repo**, and this repo never edits them.
-- Schema changes hand back through a `v<X>.0_engine_handoff/` folder with `EXPORT_CONTRACT.md`,
-  the old→new field mapping, and **real regenerated fixture exports**. Merge to `master` only
-  after the engine accepts the new `markup_convention`.
+- **Coordinator (Jordan 13 Nov 2026):** the BML engine edit surface (the Claude Code refinement
+  session, `bml-refinement` MARKUP APP section) owns changes to this app AND to the engine that reads
+  it, and lands both in the same refinement run. It never hands an app change to a separate session.
+- **This repo** — app code only. `quantify_quote.py`, `BML_Price_List.json`, rates, job files and
+  exports **never enter this repo** (it is public).
+- **Every export change:** a test in `tests/`, an `EXPORT_SCHEMA_v<old>_to_v<new>.md` note stating
+  engine readiness, the engine readers updated first, and `check_markup_app.py` PASS on the branch.
+  Merge to `master` (= live) only on Jordan's go-ahead.
